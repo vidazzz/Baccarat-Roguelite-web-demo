@@ -791,6 +791,31 @@ export function recognizeDerivedConfidenceRoads(history: RoundResult[], roadBook
   }];
 }
 
+export function confidenceRoadStartColumn(history: RoundResult[], roadBook: Exclude<RoadBook, "bead">): number | null {
+  const activePattern = roadBook === "big"
+    ? recognizeConfidenceRoads(history, "big")[0]
+    : recognizeDerivedConfidenceRoads(history, roadBook, 0)[0];
+  if (!activePattern) return null;
+
+  const derived = roadBook === "big" ? null : makeDerivedRoads(history);
+  const cells = roadBook === "big"
+    ? makeBigRoad(history)
+    : derived![derivedRoadKey(roadBook)];
+  const columns = [...new Set(cells.map((cell) => cell.column))].sort((a, b) => b - a);
+  for (const startColumn of columns) {
+    const candidate = roadBook === "big"
+      ? (() => {
+        const startRound = cells
+          .filter((cell) => cell.column >= startColumn)
+          .reduce<number | null>((earliest, cell) => earliest === null ? cell.roundIndex : Math.min(earliest, cell.roundIndex), null);
+        return startRound === null ? undefined : recognizeConfidenceRoads(history.slice(startRound), "big")[0];
+      })()
+      : recognizeDerivedConfidenceRoads(history, roadBook, startColumn)[0];
+    if (candidate?.id === activePattern.id && candidate.prediction === activePattern.prediction) return startColumn;
+  }
+  return null;
+}
+
 export function cardLabel(card: Card): string {
   return `${rankLabel(card)}${suitSymbol(card)}`;
 }

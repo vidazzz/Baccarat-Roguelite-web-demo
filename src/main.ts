@@ -1,5 +1,5 @@
 import "./style.css";
-import { cardLabel, cardValue, divineCallForRound, forecastBaccaratReveal, isRedCard, makeBeadPlate, makeBigRoad, makeDerivedRoads, pipLayout, predictRoadColors, rankLabel, suitSymbol, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type Outcome, type RoadBook, type Side } from "./domain";
+import { cardLabel, cardValue, confidenceRoadStartColumn, divineCallForRound, forecastBaccaratReveal, isRedCard, makeBeadPlate, makeBigRoad, makeDerivedRoads, pipLayout, predictRoadColors, rankLabel, suitSymbol, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type Outcome, type RoadBook, type Side } from "./domain";
 import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps, skillDefinitions, type Casino, type GameTable, type PendingRound, type SkillId } from "./game";
 import { TableScene } from "./table-scene";
 
@@ -1038,10 +1038,13 @@ function bind(): void {
     game.markRoad(tableId, roadBook, startColumn, startRound);
     const markedPatterns = game.markedRoadPatterns(tableId);
     const currentPattern = markedPatterns.find((pattern) => pattern.source === roadBook);
+    const exactStart = confidenceRoadStartColumn(table.history, roadBook);
     game.notice = currentPattern ? `标记完成 · 共标记 ${markedRoadBookCount(tableId)} 路，成立 ${markedPatterns.length} 型` : "标记完成 · 当前区间未形成有效路数";
     roadMarkFeedback = {
       message: "路书区间已标记",
-      debug: currentPattern ? `${currentPattern.name}有效，预测${outcomeName(currentPattern.prediction)}` : "当前无有效路数",
+      debug: currentPattern
+        ? `${currentPattern.name}有效，预测${outcomeName(currentPattern.prediction)}`
+        : exactStart === null ? "当前无有效路数" : `未命中有效路数起始列；应标记第 ${exactStart + 1} 列`,
     };
     render();
   }));

@@ -12,6 +12,7 @@ import {
   type ConfidenceRoadPattern,
   recognizeConfidenceRoads,
   recognizeDerivedConfidenceRoads,
+  confidenceRoadStartColumn,
   retargetRoundCard,
 } from "./domain";
 
@@ -249,15 +250,18 @@ export class Game {
   markedRoadPatterns(tableId: string): ConfidenceRoadPattern[] {
     const table = this.table(tableId);
     const patterns: ConfidenceRoadPattern[] = [];
-    for (const roadBook of ["bead", "big"] as const) {
-      const mark = this.roadMark(tableId, roadBook);
-      if (!mark) continue;
-      patterns.push(...recognizeConfidenceRoads(table.history.slice(mark.startRound), roadBook));
+    const beadMark = this.roadMark(tableId, "bead");
+    if (beadMark) patterns.push(...recognizeConfidenceRoads(table.history, "bead"));
+    const bigMark = this.roadMark(tableId, "big");
+    const bigStart = confidenceRoadStartColumn(table.history, "big");
+    if (bigMark && bigStart !== null && bigMark.startColumn === bigStart) {
+      patterns.push(...recognizeConfidenceRoads(table.history, "big"));
     }
     for (const roadBook of ["big-eye", "small", "cockroach"] as const) {
       const mark = this.roadMark(tableId, roadBook);
-      if (!mark) continue;
-      patterns.push(...recognizeDerivedConfidenceRoads(table.history, roadBook, mark.startColumn));
+      const exactStart = confidenceRoadStartColumn(table.history, roadBook);
+      if (!mark || exactStart === null || mark.startColumn !== exactStart) continue;
+      patterns.push(...recognizeDerivedConfidenceRoads(table.history, roadBook, 0));
     }
     return this.uniqueRoadPatterns(patterns);
   }

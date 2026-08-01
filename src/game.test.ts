@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Game, LOBBY_ROUND_MS, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps } from "./game";
-import type { RoundResult } from "./domain";
+import { confidenceRoadStartColumn, type RoundResult } from "./domain";
 
 const historyRound = (outcome: RoundResult["outcome"], id: number): RoundResult => ({
   id, outcome, bankerCards: [{ rank: 7, suit: "spade" }, { rank: 2, suit: "heart" }],
@@ -207,12 +207,43 @@ describe("confidence settlement", () => {
     const table = game.table("harbor-1");
     const sequence = "BBBBPPPPPBBBBPBBPPPBBPBBBPBPPBBPPBBBBPPBBBBBPBBPBPBPBPBP";
     table.history = sequence.split("").map((value, index) => historyRound(value === "B" ? "banker" : "player", index));
-    game.markRoad(table.id, "small", 0, 0);
+    const exactStart = confidenceRoadStartColumn(table.history, "small")!;
+    game.markRoad(table.id, "small", exactStart, 0);
 
     const pending = game.play(table.id, { side: "banker", amount: 100 });
 
     expect(pending.confidenceBreakdown.markedPatterns.some((pattern) => pattern.source === "small")).toBe(true);
     expect(pending.confidenceBreakdown.markedPatternBonus).toBeGreaterThan(0);
+  });
+
+  it("requires an exact lower-road start column instead of accepting an earlier column", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    const sequence = "BBBBPPPPPBBBBPBBPPPBBPBBBPBPPBBPPBBBBPPBBBBBPBBPBPBPBPBP";
+    table.history = sequence.split("").map((value, index) => historyRound(value === "B" ? "banker" : "player", index));
+    const exactStart = confidenceRoadStartColumn(table.history, "small")!;
+    expect(exactStart).toBeGreaterThan(0);
+
+    game.markRoad(table.id, "small", exactStart - 1, 0);
+    expect(game.markedRoadPatterns(table.id).some((pattern) => pattern.source === "small")).toBe(false);
+
+    game.markRoad(table.id, "small", exactStart, 0);
+    expect(game.markedRoadPatterns(table.id).some((pattern) => pattern.source === "small")).toBe(true);
+  });
+
+  it("requires the exact big-road suffix column instead of accepting the first column", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    const runs = [["player", 5], ["banker", 1], ["player", 3], ["banker", 2], ["player", 4]] as const;
+    table.history = runs.flatMap(([outcome, count]) => Array.from({ length: count }, (_, index) => historyRound(outcome, index)));
+    const exactStart = confidenceRoadStartColumn(table.history, "big")!;
+    expect(exactStart).toBeGreaterThan(0);
+
+    game.markRoad(table.id, "big", 0, 0);
+    expect(game.markedRoadPatterns(table.id).some((pattern) => pattern.source === "big")).toBe(false);
+
+    game.markRoad(table.id, "big", exactStart, 0);
+    expect(game.markedRoadPatterns(table.id).some((pattern) => pattern.id === "big-1324")).toBe(true);
   });
 
   it("adds confidence only when a marked road predicts the wagered side", () => {
