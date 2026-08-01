@@ -508,6 +508,14 @@ function dealingView(): string {
   const dealerSide: Side | null = ownedSide ? ownedSide === "banker" ? "player" : "banker" : null;
   const selfNext = ownedSide ? nextUnrevealedForSide(pending, ownedSide) : null;
   const dealerNext = dealerSide ? nextUnrevealedForSide(pending, dealerSide) : null;
+  const finalCardForecast = currentCardForecast(pending);
+  const revealChoice = dealStage === "awaiting-card" && ownedSide
+    ? finalCardForecast
+      ? `<div class="last-card-action-bar">${finalCardForecast}<div class="last-card-actions"><span>选择开牌方式</span><div><button class="primary" data-action="reveal-self" ${selfNext === null ? "disabled" : ""}>自己开${outcomeName(ownedSide)}家末张</button><button class="secondary" data-action="reveal-dealer" ${dealerNext === null ? "disabled" : ""}>荷官开${outcomeName(dealerSide!)}家末张</button></div></div></div>`
+      : `<div class="reveal-choice"><span>选择下一张牌</span><div><button class="primary" data-action="reveal-self" ${selfNext === null ? "disabled" : ""}>自己开${outcomeName(ownedSide)}家下一张</button><button class="secondary" data-action="reveal-dealer" ${dealerNext === null ? "disabled" : ""}>荷官开${outcomeName(dealerSide!)}家下一张</button></div><small>${outcomeName(ownedSide)}家剩 ${sequence.filter((entry, index) => index < dealtCardCount && entry.side === ownedSide && !revealedCardIndices.has(index)).length} 张 · ${outcomeName(dealerSide!)}家剩 ${sequence.filter((entry, index) => index < dealtCardCount && entry.side === dealerSide && !revealedCardIndices.has(index)).length} 张</small></div>`
+    : dealStage === "dealer-revealing" && finalCardForecast
+      ? `<div class="last-card-action-bar dealer-opening">${finalCardForecast}</div>`
+      : "";
   const result = dealStage === "settled" ? pending.result : null;
   const confidenceFeedback = `封盘结算 · ${Math.round(pending.confidence * 100)}%`;
   const delta = lastSettlement?.delta ?? 0;
@@ -525,8 +533,7 @@ function dealingView(): string {
           <div class="immersive-table-stage">
             <div id="table-3d-stage" aria-label="3D百家乐牌桌"></div>
             ${pending.bet ? `<div class="active-bet-marker ${pending.bet.side}"><i></i><span>押${outcomeName(pending.bet.side)}</span><strong>${money(pending.bet.amount)}</strong></div>` : ""}
-            ${currentCardForecast(pending)}
-            ${dealStage === "awaiting-card" && ownedSide ? `<div class="reveal-choice"><span>选择下一张牌</span><div><button class="primary" data-action="reveal-self" ${selfNext === null ? "disabled" : ""}>自己开${outcomeName(ownedSide)}家下一张</button><button class="secondary" data-action="reveal-dealer" ${dealerNext === null ? "disabled" : ""}>荷官开${outcomeName(dealerSide!)}家下一张</button></div><small>${outcomeName(ownedSide)}家剩 ${sequence.filter((entry, index) => index < dealtCardCount && entry.side === ownedSide && !revealedCardIndices.has(index)).length} 张 · ${outcomeName(dealerSide!)}家剩 ${sequence.filter((entry, index) => index < dealtCardCount && entry.side === dealerSide && !revealedCardIndices.has(index)).length} 张</small></div>` : ""}
+            ${revealChoice}
             ${dealStage === "settled" ? `<div class="table-settlement ${settlementKind}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭结算"><section class="settlement-verdict"><i>${settlementSeal}</i><span>本局 ${outcomeName(result!.outcome)}${result!.outcome === "tie" ? "局" : "家胜"}</span><b>${betFeedback}</b><strong>${settlementAmount}</strong>${pending.bet ? `<small>押${outcomeName(pending.bet.side)} · ${money(pending.bet.amount)}</small>` : ""}${lastSettlement?.income ? `<em>餐厅同期到账 +${money(lastSettlement.income)}</em>` : ""}</section><div class="settlement-hands"><div><span>庄家 · ${result!.bankerPoints} 点</span><strong>${result!.bankerCards.map(cardLabel).join(" · ")}</strong></div><div><span>闲家 · ${result!.playerPoints} 点</span><strong>${result!.playerCards.map(cardLabel).join(" · ")}</strong></div></div><small class="settlement-dismiss-hint">点击任意位置返回牌桌</small></div>` : ""}
           </div>
         </section>
@@ -872,10 +879,21 @@ function beginSqueeze(index: number, assist: ArmedDivineAssist | null): void {
   const tableStage = document.querySelector<HTMLElement>(".immersive-table-stage")!;
   tableStage.classList.add("squeeze-active");
   const overlay = document.createElement("div");
+  const forecast = currentCardForecast(game.pending!);
   overlay.className = "table-squeeze-ui";
-  overlay.innerHTML = `<div class="drag-hint corner"><i></i><span>从左侧长边、左下角或近侧短边按住，向内推动</span></div><div class="table-squeeze-controls"><button class="secondary" data-squeeze-quick>快速开牌</button></div>`;
+  overlay.innerHTML = `
+    <div class="squeeze-direction-hints" aria-hidden="true">
+      <i class="squeeze-direction-arrow long-edge"></i>
+      <i class="squeeze-direction-arrow corner"></i>
+      <i class="squeeze-direction-arrow short-edge"></i>
+    </div>
+    <div class="table-squeeze-controls ${forecast ? "has-forecast" : ""}">
+      ${forecast}
+      <button class="secondary" data-squeeze-quick>快速开牌</button>
+    </div>`;
   tableStage.append(overlay);
   tableScene!.beginSqueeze(index, (progress) => {
+    overlay.classList.toggle("interacting", progress > 0.01);
     if (progress >= 1) overlay.classList.add("settling");
   }, () => {
     tableStage.classList.remove("squeeze-active");
@@ -942,7 +960,10 @@ function bind(): void {
       const pending = game.pending!;
       const side = playerOwnedSide(pending)! === "banker" ? "player" : "banker";
       const index = nextUnrevealedForSide(pending, side);
-      if (index !== null && tableScene) tableScene.focus(index, () => revealFocusedCardByDealer(index));
+      if (index !== null && tableScene) {
+        document.querySelector<HTMLElement>(".last-card-action-bar")?.classList.add("dealer-opening");
+        tableScene.focus(index, () => revealFocusedCardByDealer(index));
+      }
       return;
     }
     if (action === "dismiss-settlement") {
