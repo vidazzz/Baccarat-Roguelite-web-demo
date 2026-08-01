@@ -811,7 +811,9 @@ export function confidenceRoadStartColumn(history: RoundResult[], roadBook: Excl
         return startRound === null ? undefined : recognizeConfidenceRoads(history.slice(startRound), "big")[0];
       })()
       : recognizeDerivedConfidenceRoads(history, roadBook, startColumn)[0];
-    if (candidate?.id === activePattern.id && candidate.prediction === activePattern.prediction) return startColumn;
+    if (candidate?.id === activePattern.id
+      && candidate.prediction === activePattern.prediction
+      && candidate.length === activePattern.length) return startColumn;
   }
   return null;
 }

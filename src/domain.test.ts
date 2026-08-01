@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bankerShouldDraw, createRng, dealRound, divineCallForRound, forecastBaccaratReveal, handPoints, makeBeadPlate, makeBigRoad, makeDerivedRoads, pipLayout, playerShouldDraw, predictRoadColors, recognizeConfidenceRoads, recognizeDerivedConfidenceRoads, recognizePattern, retargetRoundCard, type RoundResult } from "./domain";
+import { bankerShouldDraw, confidenceRoadStartColumn, createRng, dealRound, divineCallForRound, forecastBaccaratReveal, handPoints, makeBeadPlate, makeBigRoad, makeDerivedRoads, pipLayout, playerShouldDraw, predictRoadColors, recognizeConfidenceRoads, recognizeDerivedConfidenceRoads, recognizePattern, retargetRoundCard, type RoundResult } from "./domain";
 
 const round = (outcome: RoundResult["outcome"], id: number): RoundResult => ({ id, outcome, bankerCards: [], playerCards: [], bankerPoints: 0, playerPoints: 0, natural: false });
 
@@ -191,6 +191,13 @@ describe("baccarat domain", () => {
   it("recognizes single jumps from six rounds and grows every two rounds", () => {
     const history = Array.from({ length: 8 }, (_, index) => round(index % 2 ? "player" : "banker", index));
     expect(recognizeConfidenceRoads(history).find((road) => road.id === "single-jump")).toMatchObject({ prediction: "banker", length: 2 });
+  });
+
+  it("keeps the full active-road length when locating its exact mark column", () => {
+    const history = ["banker", "banker", "player", "banker", "player", "banker", "player", "banker", "player", "banker"]
+      .map((outcome, index) => round(outcome as RoundResult["outcome"], index));
+    expect(recognizeConfidenceRoads(history, "big")[0]).toMatchObject({ id: "single-jump", length: 2 });
+    expect(confidenceRoadStartColumn(history, "big")).toBe(1);
   });
 
   it("recognizes bead diamonds from four matching results left of the next cell", () => {

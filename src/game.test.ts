@@ -314,6 +314,23 @@ describe("confidence settlement", () => {
     expect(game.confidence).toBe(0.7);
   });
 
+  it("uses the debug slider as base confidence while preserving the other modifiers", () => {
+    const game = new Game();
+    game.table("harbor-1").history = [];
+    game.setDebugBaseConfidence(0.35);
+    const pending = game.play("harbor-1", { side: "banker", amount: 800 });
+
+    expect(pending.confidenceBreakdown.base).toBeCloseTo(0.35);
+    expect(pending.confidenceBreakdown.wagerBonus).toBeCloseTo(0.05);
+    expect(game.confidence).toBeCloseTo(0.4);
+    expect(game.debugConfidenceForced).toBe(false);
+
+    game.setDebugConfidenceForced(true);
+    expect(game.confidence).toBe(1);
+    game.setDebugConfidenceForced(false);
+    expect(game.confidence).toBeCloseTo(0.4);
+  });
+
   it("always triggers Divine Assist at 100% confidence without a matching road pattern", () => {
     const game = new Game();
     game.table("harbor-1").history = [historyRound("player", 1)];

@@ -135,12 +135,12 @@ export class Game {
   equippedSkill: SkillId | null = "long-banker";
   confidence = BASE_CONFIDENCE;
   debugConfidenceForced = false;
+  debugBaseConfidence = BASE_CONFIDENCE;
   tables = new Map<string, GameTable>();
   pending: PendingRound | null = null;
   notice = "先看路，再下注。";
   private rng: Rng = createRng(20260729);
   private lastRealtimeAt = Date.now();
-  private confidenceBeforeDebug = this.confidence;
   private reservedWager = 0;
   private roadMarks = new Map<string, RoadMark>();
   private roundWinStreak = 0;
@@ -211,7 +211,7 @@ export class Game {
     }
     const generated = generateInfluencedRound(this.rng, table.round + 1, table.history, { "long-banker": 0, "long-player": 0, "ping-pong": 0, none: 0 });
     const breakdown = this.calculateConfidence(tableId, bet, liquidAssetsBeforeBet);
-    if (!this.debugConfidenceForced) this.confidence = breakdown.total;
+    this.confidence = this.debugConfidenceForced ? 1 : breakdown.total;
     const prediction = breakdown.markedPatterns.find((pattern) => pattern.prediction === bet?.side)?.prediction ?? null;
     this.pending = {
       tableId,
@@ -300,11 +300,12 @@ export class Game {
     const opposingPatternPenalty = opposing.length * -0.05;
     const roundStreakBonus = bet ? this.roundWinStreak * 0.01 : 0;
     const dayStreakBonus = bet ? this.profitableDayStreak() * 0.05 : 0;
+    const base = this.debugBaseConfidence;
     const total = bet ? Math.max(0, Math.min(1,
-      BASE_CONFIDENCE + wagerBonus + markedPatternBonus + lengthBonus + opposingPatternPenalty + roundStreakBonus + dayStreakBonus,
-    )) : BASE_CONFIDENCE;
+      base + wagerBonus + markedPatternBonus + lengthBonus + opposingPatternPenalty + roundStreakBonus + dayStreakBonus,
+    )) : base;
     return {
-      base: BASE_CONFIDENCE,
+      base,
       wagerBonus,
       markedPatternBonus,
       lengthBonus,
@@ -339,15 +340,25 @@ export class Game {
   }
 
   setDebugConfidenceForced(enabled: boolean): void {
-    if (enabled === this.debugConfidenceForced) return;
-    if (enabled) {
-      this.confidenceBeforeDebug = this.confidence;
-      this.confidence = 1;
-    } else {
-      this.confidence = this.confidenceBeforeDebug;
-    }
     this.debugConfidenceForced = enabled;
-    if (this.pending) this.pending.confidence = this.confidence;
+    this.refreshDebugConfidence();
+  }
+
+  setDebugBaseConfidence(value: number): void {
+    this.debugBaseConfidence = Math.max(0, Math.min(1, value));
+    this.refreshDebugConfidence();
+  }
+
+  private refreshDebugConfidence(): void {
+    if (this.pending) {
+      const breakdown = this.pending.confidenceBreakdown;
+      breakdown.base = this.debugBaseConfidence;
+      breakdown.total = Math.max(0, Math.min(1, breakdown.base + breakdown.wagerBonus + breakdown.markedPatternBonus + breakdown.lengthBonus + breakdown.opposingPatternPenalty + breakdown.roundStreakBonus + breakdown.dayStreakBonus));
+      this.confidence = this.debugConfidenceForced ? 1 : breakdown.total;
+      this.pending.confidence = this.confidence;
+      return;
+    }
+    this.confidence = this.debugConfidenceForced ? 1 : this.debugBaseConfidence;
   }
 
   equipSkill(skillId: SkillId | null): boolean {

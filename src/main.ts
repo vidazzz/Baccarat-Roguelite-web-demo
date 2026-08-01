@@ -554,8 +554,17 @@ function syncConfidenceDisplay(): void {
   document.querySelectorAll<HTMLElement>(".confidence strong").forEach((element) => {
     element.textContent = `${Math.round(game.confidence * 100)}%`;
   });
-  const debugValue = document.querySelector<HTMLElement>("[data-debug-confidence-value]");
-  if (debugValue) debugValue.textContent = `${Math.round(game.confidence * 100)}%`;
+  document.querySelectorAll<HTMLElement>("[data-debug-confidence-value]").forEach((element) => {
+    element.textContent = `${Math.round(game.confidence * 100)}%`;
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-debug-base-confidence]").forEach((element) => {
+    const value = String(Math.round(game.debugBaseConfidence * 100));
+    element.value = value;
+    element.style.setProperty("--debug-confidence", `${value}%`);
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-debug-confidence-lock]").forEach((element) => {
+    element.checked = game.debugConfidenceForced;
+  });
 }
 
 function renderDebugMenu(): void {
@@ -563,14 +572,27 @@ function renderDebugMenu(): void {
   if (!debugMenuOpen) return;
   const overlay = document.createElement("div");
   overlay.className = "debug-overlay";
-  overlay.innerHTML = `<section class="debug-menu" role="dialog" aria-modal="true" aria-label="测试调试菜单"><header><div><span>TEST TOOLS</span><h2>测试调试</h2></div><button type="button" data-debug-close aria-label="关闭调试菜单">×</button></header><div class="debug-row"><div><strong>信心锁定 100%</strong><small>神助触发率锁定为 100%，关闭后恢复原值</small></div><label class="debug-switch"><input type="checkbox" data-debug-confidence ${game.debugConfidenceForced ? "checked" : ""}><i></i></label></div><footer><span>当前信心</span><strong data-debug-confidence-value>${Math.round(game.confidence * 100)}%</strong><small>按 ESC 关闭</small></footer></section>`;
+  const confidencePercent = Math.round(game.confidence * 100);
+  const basePercent = Math.round(game.debugBaseConfidence * 100);
+  overlay.innerHTML = `<section class="debug-menu" role="dialog" aria-modal="true" aria-label="测试调试菜单"><header><div><span>TEST TOOLS</span><h2>测试调试</h2></div><button type="button" data-debug-close aria-label="关闭调试菜单">×</button></header><div class="debug-row debug-confidence-control"><div><strong>基础信心</strong><small>滑块只修改信心公式的基础值；路数、下注和连胜仍会照常结算。</small></div><output data-debug-base-confidence-value>${basePercent}%</output><div class="debug-slider-row"><input type="range" min="0" max="100" value="${basePercent}" style="--debug-confidence:${basePercent}%" data-debug-base-confidence aria-label="调整基础信心"><div><span>0%</span><span>50%</span><span>100%</span></div></div><button class="debug-reset" type="button" data-debug-confidence-reset ${basePercent === 70 ? "disabled" : ""}>恢复默认 70%</button><label class="debug-switch"><input type="checkbox" data-debug-confidence-lock ${game.debugConfidenceForced ? "checked" : ""}><i></i><span>锁定 100% 信心</span></label></div><footer><span>${game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心"}</span><strong data-debug-confidence-value>${confidencePercent}%</strong><small>按 ESC 关闭</small></footer></section>`;
   document.body.append(overlay);
   overlay.querySelector<HTMLElement>("[data-debug-close]")!.addEventListener("click", () => {
     debugMenuOpen = false;
     renderDebugMenu();
   });
-  overlay.querySelector<HTMLInputElement>("[data-debug-confidence]")!.addEventListener("change", (event) => {
+  overlay.querySelector<HTMLInputElement>("[data-debug-base-confidence]")!.addEventListener("input", (event) => {
+    game.setDebugBaseConfidence(Number((event.currentTarget as HTMLInputElement).value) / 100);
+    syncConfidenceDisplay();
+    (overlay.querySelector("[data-debug-confidence-reset]") as HTMLButtonElement).disabled = false;
+  });
+  overlay.querySelector<HTMLInputElement>("[data-debug-confidence-lock]")!.addEventListener("change", (event) => {
     game.setDebugConfidenceForced((event.currentTarget as HTMLInputElement).checked);
+    syncConfidenceDisplay();
+    overlay.querySelector("footer span")!.textContent = game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心";
+  });
+  overlay.querySelector<HTMLElement>("[data-debug-confidence-reset]")!.addEventListener("click", () => {
+    game.setDebugBaseConfidence(0.7);
+    renderDebugMenu();
     syncConfidenceDisplay();
   });
 }
