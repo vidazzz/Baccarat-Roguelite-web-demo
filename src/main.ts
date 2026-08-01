@@ -438,16 +438,11 @@ const forecastRankCandidates: ForecastRankCandidate[] = [
 function forecastRankLabel(group: ForecastRankGroup): string {
   const labels = group.candidates.flatMap((candidate) => candidate.labels);
   if (labels.length === 13) return "全牌型";
-  if (group.candidates.some((candidate) => candidate.faceGroup)) return labels.join("/");
+  const includesFaceCards = group.candidates.some((candidate) => candidate.faceGroup);
+  if (includesFaceCards && labels.length === 4) return "10/J/Q/K";
+  if (includesFaceCards) return `${labels[0]}-K`;
   if (labels.length === 1) return labels[0]!;
   return `${labels[0]}-${labels.at(-1)}`;
-}
-
-function forecastRankDetail(group: ForecastRankGroup): string {
-  if (group.candidates.flatMap((candidate) => candidate.labels).length === 13) return "A-K · 含 10/J/Q/K";
-  if (group.candidates.some((candidate) => candidate.faceGroup)) return "均为 0 点";
-  const values = group.candidates.map((candidate) => candidate.value);
-  return values.length === 1 ? `${values[0]} 点` : `${values[0]}-${values.at(-1)} 点`;
 }
 
 function currentCardForecast(pending: PendingRound): string {
@@ -462,7 +457,7 @@ function currentCardForecast(pending: PendingRound): string {
     const forecast = forecastLabel(forecastBaccaratReveal(player, banker, entry.side, entry.handIndex, candidate.value), pending);
     const previous = result.at(-1);
     const sameResult = previous?.result.label === forecast.label && previous.result.className === forecast.className;
-    const canMerge = sameResult && !candidate.faceGroup && !previous?.candidates.some((item) => item.faceGroup);
+    const canMerge = sameResult;
     if (canMerge) previous!.candidates.push(candidate);
     else result.push({ candidates: [candidate], result: forecast });
     return result;
@@ -474,7 +469,7 @@ function currentCardForecast(pending: PendingRound): string {
   }
   const values = groups.map((group) => {
     const ranks = forecastRankLabel(group);
-    return `<div class="forecast-value ${group.result.className} ${group.candidates.some((candidate) => candidate.faceGroup) ? "face-group" : ""}" aria-label="${ranks}：${group.result.label}"><b>${ranks}</b><span>${group.result.label}</span><small>${forecastRankDetail(group)}</small></div>`;
+    return `<div class="forecast-value ${group.result.className} ${group.candidates.some((candidate) => candidate.faceGroup) ? "face-group" : ""}" aria-label="${ranks}：${group.result.label}"><b>${ranks}</b><span>${group.result.label}</span></div>`;
   }).join("");
   const perspective = pending.bet ? `以押${outcomeName(pending.bet.side)}判定` : "旁观判定";
   return `<section class="card-forecast"><header><div><span>末张判势</span><strong>开${outcomeName(entry.side)}家第 ${entry.handIndex + 1} 张</strong></div><small>${perspective}</small></header><div class="forecast-values" style="--forecast-count:${groups.length}">${values}</div></section>`;
