@@ -39,6 +39,20 @@ npm test
 npm run build
 ```
 
+## 自动部署
+
+仓库内置 GitHub Actions 工作流 `.github/workflows/deploy.yml`。推送到 `main` 后，工作流会先执行测试和生产构建，再通过 SSH 将 `dist/` 同步到云服务器。
+
+在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 中配置：
+
+- `DEPLOY_HOST`：服务器域名或 IP；
+- `DEPLOY_PORT`：SSH 端口，可选，默认 `22`；
+- `DEPLOY_USER`：用于部署的 Linux 用户；
+- `DEPLOY_SSH_KEY`：该用户对应的私钥；
+- `DEPLOY_PATH`：Nginx 网站根目录，例如 `/var/www/baccarat`。
+
+服务器需要提前创建网站目录、安装 Nginx 和 `rsync`，并把部署公钥加入部署用户的 `~/.ssh/authorized_keys`。工作流只上传构建后的静态文件，不会覆盖服务器上的其他目录。
+
 ## 文档
 
 - [MVP 游戏设计文档](docs/game-design.md)
