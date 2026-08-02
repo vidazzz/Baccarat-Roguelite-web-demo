@@ -111,7 +111,7 @@ export const RESTAURANT_CYCLE_WORLD_MINUTES = 60;
 export const WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO = 60;
 export const WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO = 1;
 export const MAX_SKILL_LEVEL = 5;
-export const BASE_CONFIDENCE = 0.7;
+export const BASE_CONFIDENCE = 0;
 const MAX_TABLE_HISTORY = 240;
 
 export const skillDefinitions: SkillDefinition[] = [
@@ -245,6 +245,13 @@ export class Game {
 
   roadMark(tableId: string, roadBook: RoadBook): RoadMark | null {
     return this.roadMarks.get(`${tableId}:${roadBook}`) ?? null;
+  }
+
+  clearRoadMarks(tableId: string): void {
+    this.table(tableId);
+    for (const roadBook of ["bead", "big", "big-eye", "small", "cockroach"] as const) {
+      this.roadMarks.delete(`${tableId}:${roadBook}`);
+    }
   }
 
   markedRoadPatterns(tableId: string): ConfidenceRoadPattern[] {

@@ -176,6 +176,23 @@ describe("casino entry fees", () => {
 });
 
 describe("confidence settlement", () => {
+  it("starts with zero base confidence and clears every road mark on a table", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+
+    expect(game.confidence).toBe(0);
+    expect(game.debugBaseConfidence).toBe(0);
+
+    game.markRoad(table.id, "big", 0, 0);
+    game.markRoad(table.id, "small", 0, 0);
+    game.markCurrentBeadRoad(table.id);
+    game.clearRoadMarks(table.id);
+
+    expect(game.roadMark(table.id, "bead")).toBeNull();
+    expect(game.roadMark(table.id, "big")).toBeNull();
+    expect(game.roadMark(table.id, "small")).toBeNull();
+  });
+
   it("marks the whole bead plate regardless of whether the next-cell row forms a road", () => {
     const game = new Game();
     const table = game.table("harbor-1");
@@ -252,7 +269,7 @@ describe("confidence settlement", () => {
     game.markRoad("harbor-1", "big", 0, 0);
     const pending = game.play("harbor-1", { side: "banker", amount: 100 });
 
-    expect(pending.confidence).toBeCloseTo(0.75);
+    expect(pending.confidence).toBeCloseTo(0.05);
     expect(pending.confidenceBreakdown.markedPatternBonus).toBeCloseTo(0.05);
     expect(pending.confidenceBreakdown.lengthBonus).toBeCloseTo(0);
     expect(pending.confidencePrediction).toBe("banker");
@@ -264,7 +281,7 @@ describe("confidence settlement", () => {
     game.table("harbor-1").history = Array.from({ length: 5 }, (_, index) => historyRound("banker", index));
     const pending = game.play("harbor-1", { side: "player", amount: 100 });
 
-    expect(pending.confidence).toBeCloseTo(0.65);
+    expect(pending.confidence).toBeCloseTo(0);
     expect(pending.confidenceBreakdown.opposingPatternPenalty).toBeCloseTo(-0.05);
     expect(pending.confidencePrediction).toBeNull();
   });
@@ -275,7 +292,7 @@ describe("confidence settlement", () => {
     const pending = game.play("harbor-1", { side: "banker", amount: 800 });
 
     expect(pending.confidenceBreakdown.wagerBonus).toBeCloseTo(0.05);
-    expect(pending.confidence).toBeCloseTo(0.75);
+    expect(pending.confidence).toBeCloseTo(0.05);
   });
 
   it("adds two points for each marked road length after length one", () => {
@@ -286,7 +303,7 @@ describe("confidence settlement", () => {
 
     expect(pending.confidenceBreakdown.markedPatterns.find((pattern) => pattern.id === "long-banker")?.length).toBe(2);
     expect(pending.confidenceBreakdown.lengthBonus).toBeCloseTo(0.02);
-    expect(pending.confidence).toBeCloseTo(0.77);
+    expect(pending.confidence).toBeCloseTo(0.07);
   });
 
   it("adds round and previous profitable-day streak bonuses", () => {
@@ -302,7 +319,7 @@ describe("confidence settlement", () => {
     const next = game.play(table.id, { side: "banker", amount: 100 });
     expect(next.confidenceBreakdown.roundStreakBonus).toBeCloseTo(0.01);
     expect(next.confidenceBreakdown.dayStreakBonus).toBeCloseTo(0.05);
-    expect(next.confidence).toBeCloseTo(0.76);
+    expect(next.confidence).toBeCloseTo(0.06);
   });
 
   it("forces confidence to 100% and restores the previous value", () => {
@@ -311,7 +328,7 @@ describe("confidence settlement", () => {
     expect(game.confidence).toBe(1);
     expect(game.debugConfidenceForced).toBe(true);
     game.setDebugConfidenceForced(false);
-    expect(game.confidence).toBe(0.7);
+    expect(game.confidence).toBe(0);
   });
 
   it("uses the debug slider as base confidence while preserving the other modifiers", () => {

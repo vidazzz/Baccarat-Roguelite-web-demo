@@ -332,7 +332,7 @@ function tableView(): string {
             <div class="confidence-readout"><span>当前信心 ${Math.round(game.confidence * 100)}%</span><strong>${confidenceMessage}</strong></div>
           </div>
         </section>
-        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2><span class="pattern ${markedBookCount ? "active" : ""}">${markedBookCount ? `已标记 ${markedBookCount} 路 · DEBUG 有效 ${markedPatterns.length} 路` : "点击路书标记"}</span></div>${roadFeedback}${recognizedPatternList}${roadSheet(table, false, true)}</aside>
+        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2><div class="road-mark-actions"><span class="pattern ${markedBookCount ? "active" : ""}">${markedBookCount ? `已标记 ${markedBookCount} 路 · DEBUG 有效 ${markedPatterns.length} 路` : "点击路书标记"}</span>${markedBookCount ? "<button class=\"clear-road-marks\" data-action=\"clear-road-marks\">全清标记</button>" : ""}</div></div>${roadFeedback}${recognizedPatternList}${roadSheet(table, false, true)}</aside>
       </div>
     </section>
   `);
@@ -574,7 +574,7 @@ function renderDebugMenu(): void {
   overlay.className = "debug-overlay";
   const confidencePercent = Math.round(game.confidence * 100);
   const basePercent = Math.round(game.debugBaseConfidence * 100);
-  overlay.innerHTML = `<section class="debug-menu" role="dialog" aria-modal="true" aria-label="测试调试菜单"><header><div><span>TEST TOOLS</span><h2>测试调试</h2></div><button type="button" data-debug-close aria-label="关闭调试菜单">×</button></header><div class="debug-row debug-confidence-control"><div><strong>基础信心</strong><small>滑块只修改信心公式的基础值；路数、下注和连胜仍会照常结算。</small></div><output data-debug-base-confidence-value>${basePercent}%</output><div class="debug-slider-row"><input type="range" min="0" max="100" value="${basePercent}" style="--debug-confidence:${basePercent}%" data-debug-base-confidence aria-label="调整基础信心"><div><span>0%</span><span>50%</span><span>100%</span></div></div><button class="debug-reset" type="button" data-debug-confidence-reset ${basePercent === 70 ? "disabled" : ""}>恢复默认 70%</button><label class="debug-switch"><input type="checkbox" data-debug-confidence-lock ${game.debugConfidenceForced ? "checked" : ""}><i></i><span>锁定 100% 信心</span></label></div><footer><span>${game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心"}</span><strong data-debug-confidence-value>${confidencePercent}%</strong><small>按 ESC 关闭</small></footer></section>`;
+  overlay.innerHTML = `<section class="debug-menu" role="dialog" aria-modal="true" aria-label="测试调试菜单"><header><div><span>TEST TOOLS</span><h2>测试调试</h2></div><button type="button" data-debug-close aria-label="关闭调试菜单">×</button></header><div class="debug-row debug-confidence-control"><div><strong>基础信心</strong><small>滑块只修改信心公式的基础值；路数、下注和连胜仍会照常结算。</small></div><output data-debug-base-confidence-value>${basePercent}%</output><div class="debug-slider-row"><input type="range" min="0" max="100" value="${basePercent}" style="--debug-confidence:${basePercent}%" data-debug-base-confidence aria-label="调整基础信心"><div><span>0%</span><span>50%</span><span>100%</span></div></div><button class="debug-reset" type="button" data-debug-confidence-reset ${basePercent === 0 ? "disabled" : ""}>恢复默认 0%</button><label class="debug-switch"><input type="checkbox" data-debug-confidence-lock ${game.debugConfidenceForced ? "checked" : ""}><i></i><span>锁定 100% 信心</span></label></div><footer><span>${game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心"}</span><strong data-debug-confidence-value>${confidencePercent}%</strong><small>按 ESC 关闭</small></footer></section>`;
   document.body.append(overlay);
   overlay.querySelector<HTMLElement>("[data-debug-close]")!.addEventListener("click", () => {
     debugMenuOpen = false;
@@ -591,7 +591,7 @@ function renderDebugMenu(): void {
     overlay.querySelector("footer span")!.textContent = game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心";
   });
   overlay.querySelector<HTMLElement>("[data-debug-confidence-reset]")!.addEventListener("click", () => {
-    game.setDebugBaseConfidence(0.7);
+    game.setDebugBaseConfidence(0);
     renderDebugMenu();
     syncConfidenceDisplay();
   });
@@ -944,6 +944,11 @@ function bind(): void {
     if (action === "equip-skill") game.equipSkill(element.dataset.skill as SkillId);
     if (action === "unequip-skill") game.equipSkill(null);
     if (action === "upgrade-skill") game.upgradeSkill(element.dataset.skill as SkillId);
+    if (action === "clear-road-marks") {
+      game.clearRoadMarks(tableId);
+      roadMarkFeedback = null;
+      game.notice = "已清除本桌全部路书标记";
+    }
     if (action === "cancel-bet") {
       const refund = game.cancelReservedBet();
       stagedBetSide = null;
