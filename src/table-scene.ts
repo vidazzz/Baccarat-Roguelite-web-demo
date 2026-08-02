@@ -371,6 +371,7 @@ export class TableScene {
     const entry = this.cards[this.squeezeIndex]!;
     const snapped = snapSqueezeDirection(local.x, local.y, "player");
     if (!snapped) return;
+    if (event.cancelable) event.preventDefault();
     this.squeezeAttempt += 1;
     this.foldNormal.set(snapped.normal.x, snapped.normal.y);
     this.fingerDirection.set(snapped.fingerDirection.x, snapped.fingerDirection.y);
@@ -390,6 +391,7 @@ export class TableScene {
 
   private pointerMove = (event: PointerEvent) => {
     if (!this.squeezeDragging) return;
+    if (event.cancelable) event.preventDefault();
     const local = this.pointerOnCardPlane(event);
     if (!local) return;
     const pointer = new THREE.Vector2(local.x, local.y);
@@ -434,8 +436,9 @@ export class TableScene {
     }
   };
 
-  private pointerUp = () => {
+  private pointerUp = (event?: PointerEvent) => {
     if (!this.squeezeDragging) return;
+    if (event?.cancelable) event.preventDefault();
     this.squeezeDragging = false;
     this.renderer.domElement.style.cursor = "grab";
     if (this.foldAdvance() >= SQUEEZE_COMPLETE_PROGRESS) this.quickSqueeze();

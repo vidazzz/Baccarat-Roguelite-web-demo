@@ -1,14 +1,20 @@
 import "./style.css";
+import casinoAsset from "./casino.jpg";
+import homeAsset from "./home.jpg";
+import mapAsset from "./map.jpg";
+import restaurantAsset from "./restaurant.jpg";
 import { cardLabel, cardValue, confidenceRoadStartColumn, divineCallForRound, forecastBaccaratReveal, isRedCard, makeBeadPlate, makeBigRoad, makeDerivedRoads, pipLayout, predictRoadColors, rankLabel, suitSymbol, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type Outcome, type RoadBook, type Side } from "./domain";
 import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps, skillDefinitions, type Casino, type GameTable, type PendingRound, type SkillId } from "./game";
 import { TableScene } from "./table-scene";
 
-type View = "home" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
+type View = "map" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
+type Activity = "restaurant" | "casino" | "home";
 type DealStage = "animating" | "drawing-card" | "awaiting-card" | "dealer-revealing" | "settled";
 
 const game = new Game();
 const app = document.querySelector<HTMLDivElement>("#app")!;
-let view: View = "home";
+let view: View = "map";
+let activeActivity: Activity = "restaurant";
 let casinoId = casinos[0]!.id;
 let tableId = "harbor-1";
 let stagedBetSide: Outcome | null = null;
@@ -50,14 +56,11 @@ const worldTimePaused = () => view === "table"
   || (debugMenuOpen && view === "dealing");
 
 function shell(content: string): string {
+  const backAction = view === "lobby" ? "casinos" : "map";
+  const backLabel = view === "lobby" ? "返回赌场" : "回到地图";
   return `
     <header class="topbar">
-      <button class="brand" data-action="home" aria-label="返回总览">澳门风云</button>
-      <nav>
-        <button data-action="restaurant" class="nav-btn">餐厅</button>
-        <button data-action="skills" class="nav-btn">技能</button>
-        <button data-action="casinos" class="nav-btn">赌场</button>
-      </nav>
+      <button class="brand ${view === "map" ? "brand-map-hidden" : ""}" data-action="${backAction}" aria-label="${backLabel}">${backLabel}</button>
       <div class="world-clock ${worldTimePaused() ? "paused" : ""}"><span>世界时间</span><strong data-world-clock>${worldTimeLabel()}</strong></div>
       <div class="confidence"><span>信心</span><strong>${Math.round(game.confidence * 100)}%</strong></div>
       <div class="wallet"><span>可用现金</span><strong>${money(game.cash)}</strong></div>
@@ -112,7 +115,11 @@ function roadQuestions(table: GameTable): string {
 
 function roadSheet(table: GameTable, compact = false, interactive = false): string {
   const derived = makeDerivedRoads(table.history);
-  return `<div class="road-sheet ${compact ? "compact" : ""}"><div class="road-board"><section class="bead-road-panel"><div class="road-panel-heading"><i class="bead-symbol banker"></i>珠盘路</div>${beadPlate(table, interactive)}</section><section class="big-road-panel"><div class="road-panel-heading"><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive)}</section><div class="derived-grid">${derivedRoad(table, derived.bigEye, "大眼仔路", "big-eye", "big-eye", true, interactive)}${derivedRoad(table, derived.small, "小路", "small", "small-road", true, interactive)}${derivedRoad(table, derived.cockroach, "曱甴路", "cockroach", "cockroach-road", true, interactive)}</div><aside class="road-info-panel">${roadStats(table)}${roadQuestions(table)}</aside></div></div>`;
+  const bead = `<section class="bead-road-panel"><div class="road-panel-heading"><i class="bead-symbol banker"></i>珠盘路</div>${beadPlate(table, interactive)}</section>`;
+  const big = `<section class="big-road-panel"><div class="road-panel-heading"><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive)}</section>`;
+  const derivedRoads = `${derivedRoad(table, derived.bigEye, "大眼仔路", "big-eye", "big-eye", true, interactive)}${derivedRoad(table, derived.small, "小路", "small", "small-road", true, interactive)}${derivedRoad(table, derived.cockroach, "曱甴路", "cockroach", "cockroach-road", true, interactive)}`;
+  const info = `<aside class="road-info-panel">${roadStats(table)}${roadQuestions(table)}</aside>`;
+  return `<div class="road-sheet road-sheet-desktop ${compact ? "compact" : ""}"><div class="road-board">${bead}${big}<div class="derived-grid">${derivedRoads}</div>${info}</div></div><div class="road-sheet road-sheet-mobile ${compact ? "compact" : ""}"><div class="mobile-road-stack">${bead}${big}<div class="derived-grid">${derivedRoads}</div>${info}</div></div>`;
 }
 
 function beadPlate(table: GameTable, interactive = false): string {
@@ -122,32 +129,27 @@ function beadPlate(table: GameTable, interactive = false): string {
   return `<div class="bead-plate ${interactive ? "markable-road" : ""}" aria-label="${table.name} 珠盘路" ${interactive ? `data-road-book="bead"` : ""}>${roadMarkOverlay(table, "bead", visibleFrom, 9)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="bead ${cell.outcome}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${outcomeName(cell.outcome)}</span>`).join("")}</div>`;
 }
 
-function homeView(): string {
+function mapView(): string {
   const restaurant = game.restaurantInfo();
-  const equipped = skillDefinitions.find((skill) => skill.id === game.equippedSkill);
-  const restaurantProgress = game.restaurant.cycleElapsedWorldMinutes / RESTAURANT_CYCLE_WORLD_MINUTES;
-  const worldMinutesRemaining = Math.ceil(RESTAURANT_CYCLE_WORLD_MINUTES - game.restaurant.cycleElapsedWorldMinutes);
+  const activityName = ({ restaurant: "外港小馆", casino: "赌场", home: "自宅" } as const)[activeActivity];
+  const locationClass = (activity: Activity) => activeActivity === activity ? "is-current" : "";
+  const locationStatus = (activity: Activity, defaultLabel: string) => activeActivity === activity ? "<i class=\"map-current-tag\">当前所在</i>" : `<i>${defaultLabel}</i>`;
   return shell(`
-    <section class="dashboard">
-      <div class="intro">
-        <p class="eyebrow">牌路试炼 · MVP</p>
-        <h1>看准一条路，<br>再决定押多少。</h1>
-        <p class="lede">十张牌桌同时开局。你的赌术会让玄学成真，但优势从来不是保证。</p>
-        <button class="primary" data-action="casinos">进入赌场</button>
-      </div>
-      <div class="restaurant-band">
-        <div>
-          <span class="section-kicker">外港小馆</span>
-          <h2>${game.restaurant.pawned ? "已典当" : `${game.restaurant.level} 级经营中`}</h2>
-          <p>${game.restaurant.pawned ? "餐厅已停止产出。" : `离开赌场期间，每 1 游戏小时产出 ${money(restaurant.income)}`}</p>
-        </div>
-        <div class="cycle-ring" data-restaurant-clock style="--progress:${restaurantProgress}"><strong>${worldMinutesRemaining}分</strong><span>游戏时间</span></div>
-        <button class="secondary" data-action="restaurant">管理餐厅</button>
-      </div>
-      <div class="skill-strip">
-        <article><span>唯一技能栏</span><strong>${equipped ? equipped.name : "未装备"}</strong></article>
-        <article><span>${equipped ? `${equipped.description} 当前信心改由路书标记结算。` : "信心由路书标记与下注风险共同结算。"}</span><strong>${equipped ? `Lv.${game.skills[equipped.id]}` : "—"}</strong></article>
-        <button class="skill-manage-link" data-action="skills"><span>技能管理</span><strong>装配与升级 →</strong></button>
+    <section class="map-page">
+      <div class="map-world">
+        <img class="map-art" src="${mapAsset}" alt="澳门城市地图">
+        <div class="map-atmosphere" aria-hidden="true"></div>
+        <div class="map-title"><span>城市总览</span><strong>选择目的地</strong><small>第 ${game.worldTimeInfo().day} 日 · ${worldTimeLabel().slice(5)}</small><em><b></b>当前位于 · ${activityName}</em></div>
+        <button class="map-location map-location-casino ${locationClass("casino")}" data-action="casinos" aria-label="${activeActivity === "casino" ? "返回赌场" : "进入赌场"}">
+          <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">♠</span><strong>赌场</strong><small>海湾娱乐城 · 金殿贵宾厅</small>${locationStatus("casino", "进入")}
+        </button>
+        <button class="map-location map-location-restaurant ${locationClass("restaurant")}" data-action="restaurant" aria-label="${activeActivity === "restaurant" ? "返回餐厅" : "进入餐厅"}">
+          <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">店</span><strong>外港小馆</strong><small>${game.restaurant.pawned ? "已典当 · 停止营业" : `${game.restaurant.level} 级 · 每小时 ${money(restaurant.income)}`}</small>${locationStatus("restaurant", "经营")}
+        </button>
+        <button class="map-location map-location-home ${locationClass("home")}" data-action="skills" aria-label="${activeActivity === "home" ? "返回自宅" : "进入自宅"}">
+          <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">宅</span><strong>自宅</strong><small>技能管理 · 赌术构筑</small>${locationStatus("home", "进入")}
+        </button>
+        <div class="map-footer"><span>地图上的选择才会切换当前活动</span><b>餐厅在赌场外持续经营</b></div>
       </div>
     </section>
   `);
@@ -156,14 +158,17 @@ function homeView(): string {
 function skillsView(): string {
   const equipped = skillDefinitions.find((skill) => skill.id === game.equippedSkill);
   return shell(`
-    <section class="page skills-page">
-      <button class="back" data-action="home">← 返回</button>
-      <div class="page-heading"><p class="eyebrow">赌术构筑</p><h1>技能管理</h1><p>当前只有一个技能栏位。技能等级暂不直接修改信心或神助效果，信心统一在封盘后由路书规则结算。</p></div>
-      <section class="equipped-skill-slot ${equipped ? "filled" : "empty"}">
-        <div><span>唯一技能栏位 · 1 SLOT</span><h2>${equipped ? equipped.name : "尚未装备技能"}</h2><p>${equipped ? `${equipped.description} 当前 Lv.${game.skills[equipped.id]}，等级保留但不参与本轮信心公式。` : "未装备技能也可以通过标记路书获得信心。"}</p></div>
-        ${equipped ? `<button class="secondary" data-action="unequip-skill">卸下技能</button>` : ""}
-      </section>
-      <div class="skill-grid">${skillDefinitions.map((skill) => {
+    <section class="residence-scene-page">
+      <div class="residence-scene">
+        <img class="residence-scene-art" src="${homeAsset}" alt="自宅室内场景">
+        <div class="residence-scene-shade" aria-hidden="true"></div>
+        <div class="residence-scene-header"><p class="eyebrow">自宅 · 赌术构筑</p><h1>技能管理</h1><small>在自宅整理你的赌术，只有一个技能栏位。</small></div>
+        <section class="residence-skill-workspace">
+          <section class="equipped-skill-slot ${equipped ? "filled" : "empty"}">
+            <div><span>唯一技能栏位 · 1 SLOT</span><h2>${equipped ? equipped.name : "尚未装备技能"}</h2><p>${equipped ? `${equipped.description} 当前 Lv.${game.skills[equipped.id]}，等级保留但不参与本轮信心公式。` : "未装备技能也可以通过标记路书获得信心。"}</p></div>
+            ${equipped ? `<button class="secondary" data-action="unequip-skill">卸下技能</button>` : ""}
+          </section>
+          <div class="skill-grid">${skillDefinitions.map((skill) => {
         const level = game.skills[skill.id];
         const equippedNow = game.equippedSkill === skill.id;
         const upgradeCost = game.skillUpgradeCost(skill.id);
@@ -173,7 +178,9 @@ function skillsView(): string {
           <dl><div><dt>当前作用</dt><dd>不直接修改信心</dd></div><div><dt>神助效果</dt><dd>不受技能等级影响</dd></div><div><dt>下一级</dt><dd>${level >= MAX_SKILL_LEVEL ? "已满级" : "保留成长"}</dd></div></dl>
           <footer><button class="secondary" data-action="equip-skill" data-skill="${skill.id}" ${equippedNow ? "disabled" : ""}>${equippedNow ? "已装备" : "装配"}</button><button class="primary" data-action="upgrade-skill" data-skill="${skill.id}" ${upgradeCost === null || game.cash < upgradeCost ? "disabled" : ""}>${upgradeCost === null ? "已达最高等级" : `升级 · ${money(upgradeCost)}`}</button></footer>
         </article>`;
-      }).join("")}</div>
+          }).join("")}</div>
+        </section>
+      </div>
     </section>
   `);
 }
@@ -184,21 +191,17 @@ function restaurantView(): string {
   const progress = game.restaurant.cycleElapsedWorldMinutes / RESTAURANT_CYCLE_WORLD_MINUTES;
   const worldMinutesRemaining = Math.ceil(RESTAURANT_CYCLE_WORLD_MINUTES - game.restaurant.cycleElapsedWorldMinutes);
   return shell(`
-    <section class="page restaurant-page">
-      <button class="back" data-action="home">← 返回</button>
-      <div class="page-heading"><p class="eyebrow">稳定收入</p><h1>外港小馆</h1><p>玩家不在赌场时持续营业，每经过 1 游戏小时自动结算一次收益。</p></div>
-      <div class="restaurant-panel ${game.restaurant.pawned ? "is-pawned" : ""}">
-        <div class="restaurant-mark">店</div>
-        <div class="restaurant-stats">
-          <div><span>当前等级</span><strong>${game.restaurant.level}</strong></div>
-          <div><span>周期收益</span><strong>${game.restaurant.pawned ? "停止" : `${money(info.income)} / 1游戏小时`}</strong></div>
-          <div><span>典当估值</span><strong>${game.restaurant.pawned ? "已领取" : money(info.pawn)}</strong></div>
-        </div>
-        <div class="progress-line" data-restaurant-progress><span style="width:${progress * 100}%"></span><em>${game.restaurant.pawned ? "已停止" : `${worldMinutesRemaining} 游戏分钟后结算`}</em></div>
-        <div class="restaurant-actions">
-          <button class="primary" data-action="upgrade" ${game.restaurant.pawned || max || game.cash < (info.nextCost ?? 0) ? "disabled" : ""}>${max ? "已达最高等级" : `升级 · ${money(info.nextCost!)}`}</button>
-          <button class="danger" data-action="pawn" ${game.restaurant.pawned ? "disabled" : ""}>典当 · 获得 ${money(info.pawn)}</button>
-        </div>
+    <section class="restaurant-scene-page">
+      <div class="restaurant-scene">
+        <img class="restaurant-scene-art" src="${restaurantAsset}" alt="外港小馆内部场景">
+        <div class="restaurant-scene-shade" aria-hidden="true"></div>
+        <div class="restaurant-scene-header"><div><p class="eyebrow">稳定收入 · 外港小馆</p><h1>${game.restaurant.pawned ? "已典当" : `${game.restaurant.level} 级经营中`}</h1></div></div>
+        <section class="restaurant-control-panel ${game.restaurant.pawned ? "is-pawned" : ""}">
+          <header><div><span>餐厅经营</span><h2>${game.restaurant.pawned ? "停止营业" : "营业中"}</h2></div><strong>${game.restaurant.pawned ? "—" : money(info.income)}<small>${game.restaurant.pawned ? "无收益" : "/ 游戏小时"}</small></strong></header>
+          <div class="restaurant-scene-stats"><div><span>当前等级</span><b>Lv.${game.restaurant.level}</b></div><div><span>周期收益</span><b>${game.restaurant.pawned ? "停止" : money(info.income)}</b></div><div><span>典当估值</span><b>${game.restaurant.pawned ? "已领取" : money(info.pawn)}</b></div></div>
+          <div class="restaurant-progress" data-restaurant-progress><div><span>下一次结算</span><em>${game.restaurant.pawned ? "已停止" : `${worldMinutesRemaining} 游戏分钟后`}</em></div><i><b style="width:${progress * 100}%"></b></i></div>
+          <div class="restaurant-actions"><button class="primary" data-action="upgrade" ${game.restaurant.pawned || max || game.cash < (info.nextCost ?? 0) ? "disabled" : ""}>${max ? "已达最高等级" : `升级 · ${money(info.nextCost!)}`}</button><button class="danger" data-action="pawn" ${game.restaurant.pawned ? "disabled" : ""}>典当 · 获得 ${money(info.pawn)}</button></div>
+        </section>
       </div>
     </section>
   `);
@@ -206,16 +209,14 @@ function restaurantView(): string {
 
 function casinoSelectView(): string {
   return shell(`
-    <section class="page">
-      <button class="back" data-action="home">← 返回</button>
-      <div class="page-heading"><p class="eyebrow">今晚去哪一场</p><h1>选择赌场</h1><p>每次进入都需购买门票，赌场等级决定注码与可观察的牌桌数量。</p></div>
-      <div class="casino-grid">${casinos.map((casino) => `
-        <button class="casino-card ${casino.tone}" data-casino="${casino.id}" ${game.cash < casino.entryFee ? "disabled" : ""}>
-          <span class="casino-number">0${casinos.indexOf(casino) + 1}</span>
-          <div><span>${casino.subtitle}</span><h2>${casino.name}</h2></div>
-          <dl><div><dt>门票</dt><dd>${money(casino.entryFee)}</dd></div><div><dt>牌桌</dt><dd>${casino.tableCount} 张</dd></div><div><dt>注码</dt><dd>${money(casino.minBet)} - ${money(casino.maxBet)}</dd></div></dl>
-          <strong>${game.cash < casino.entryFee ? `现金不足 · 门票 ${money(casino.entryFee)}` : `支付 ${money(casino.entryFee)} 进入 →`}</strong>
-        </button>`).join("")}</div>
+    <section class="casino-scene-page">
+      <div class="casino-scene">
+        <img class="casino-scene-art" src="${casinoAsset}" alt="赌场大厅场景">
+        <div class="casino-scene-shade" aria-hidden="true"></div>
+        <div class="casino-scene-header"><div><p class="eyebrow">今晚去哪一场</p><h1>选择赌场</h1><small>选择等级，支付门票进入牌桌大厅</small></div></div>
+        ${casinos.map((casino, index) => `<button class="casino-scene-choice ${casino.tone} casino-scene-choice-${index + 1}" data-casino="${casino.id}" ${game.cash < casino.entryFee ? "disabled" : ""}><span class="casino-scene-number">0${index + 1}</span><div><span>${casino.subtitle}</span><strong>${casino.name}</strong></div><dl><div><dt>门票</dt><dd>${money(casino.entryFee)}</dd></div><div><dt>牌桌</dt><dd>${casino.tableCount} 张</dd></div><div><dt>注码</dt><dd>${money(casino.minBet)} - ${money(casino.maxBet)}</dd></div></dl><b>${game.cash < casino.entryFee ? `现金不足 · 门票 ${money(casino.entryFee)}` : "支付门票进入"}</b></button>`).join("")}
+        <div class="casino-scene-footer">门票在进入赌场时支付 · 赌场内时间流速为每秒一分钟</div>
+      </div>
     </section>
   `);
 }
@@ -225,8 +226,7 @@ function lobbyView(): string {
   const tables = [...game.tables.values()].filter((table) => table.id.startsWith(casino.id));
   return shell(`
     <section class="page lobby-page ${casino.tone}">
-      <button class="back" data-action="casinos">← 更换赌场</button>
-      <div class="lobby-heading"><div><p class="eyebrow">${casino.subtitle}</p><h1>${casino.name}</h1></div><div class="legend"><span><i class="banker"></i>庄</span><span><i class="player"></i>闲</span><span><i class="tie"></i>和</span></div></div>
+      <div class="lobby-heading"><div><p class="eyebrow">${casino.subtitle}</p><h1>${casino.name}</h1></div><div class="lobby-heading-actions"><button class="secondary" data-action="casinos">更换赌场</button><div class="legend"><span><i class="banker"></i>庄</span><span><i class="player"></i>闲</span><span><i class="tie"></i>和</span></div></div></div>
       <div class="tables-grid">${tables.map((table) => `<button class="table-card" data-table="${table.id}">${lobbyTableContent(table, casino)}</button>`).join("")}</div>
     </section>
   `);
@@ -310,7 +310,7 @@ function tableView(): string {
   const canConfirm = Boolean(stagedBetSide) && stagedAmount >= casino.minBet && stagedAmount <= casino.maxBet;
   return shell(`
     <section class="table-page">
-      <div class="table-header"><button class="back" data-action="lobby" ${inlineWatchActive && !inlineWatchSettled ? "disabled" : ""}>← 返回大厅</button><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${inlineWatchSettled ? table.round : table.round + 1} 局</span></div>
+      <div class="table-header"><span class="table-header-actions"><button class="secondary table-lobby-link" data-action="lobby" ${inlineWatchActive && !inlineWatchSettled ? "disabled" : ""}>返回大厅</button></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${inlineWatchSettled ? table.round : table.round + 1} 局</span></div>
       <div class="table-layout">
         <section class="betting-panel ${inlineWatchActive ? "inline-watching" : ""}">
           <div class="table-felt ${inlineWatchActive ? "watch-active" : ""}">
@@ -521,7 +521,7 @@ function dealingView(): string {
   const statusTitle = dealStage === "settled" ? result!.outcome === "tie" ? "和局" : `${outcomeName(result!.outcome)}家胜` : dealStage === "animating" ? "荷官发牌" : dealStage === "drawing-card" ? `${outcomeName(sequence[dealtCardCount - 1]!.side)}家补牌` : dealStage === "dealer-revealing" ? "荷官开牌" : `剩余 ${dealtCardCount - revealedCardIndices.size} 张未开`;
   return shell(`
     <section class="table-page table-dealing immersive-dealing ${dealStage}">
-      <div class="table-header"><button class="back" data-action="lobby">← 返回大厅</button><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${dealStage === "settled" ? table.round : table.round + 1} 局</span></div>
+      <div class="table-header"><span class="table-header-actions"><button class="secondary table-lobby-link" data-action="lobby">返回大厅</button></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${dealStage === "settled" ? table.round : table.round + 1} 局</span></div>
       <div class="table-layout">
         <section class="betting-panel live-deal-panel">
           <div class="deal-status"><div class="deal-status-title"><p class="eyebrow">${dealStage === "settled" ? betFeedback : isWatching ? "旁观牌局" : `已押${outcomeName(pending.bet!.side)} · ${money(pending.bet!.amount)}`}</p><h1>${statusTitle}</h1></div>${dealStage === "settled" ? "" : liveBaccaratScore(pending)}<span>${dealStage === "settled" ? `庄 ${result!.bankerPoints} 点 · 闲 ${result!.playerPoints} 点` : ownedSide ? confidenceFeedback : "本局全部由荷官开牌 · 信心不变"}</span>${dealStage !== "settled" ? confidenceBreakdownView(pending) : ""}</div>
@@ -633,7 +633,7 @@ function render(): void {
   viewTimers = [];
   tableScene?.dispose();
   tableScene = null;
-  const content = view === "home" ? homeView() : view === "restaurant" ? restaurantView() : view === "skills" ? skillsView() : view === "casino-select" ? casinoSelectView() : view === "lobby" ? lobbyView() : view === "table" ? tableView() : view === "dealing" ? dealingView() : gameOverView();
+  const content = view === "map" ? mapView() : view === "restaurant" ? restaurantView() : view === "skills" ? skillsView() : view === "casino-select" ? casinoSelectView() : view === "lobby" ? lobbyView() : view === "table" ? tableView() : view === "dealing" ? dealingView() : gameOverView();
   app.innerHTML = content;
   bind();
   if (view === "dealing") setupDealing();
@@ -930,14 +930,14 @@ function beginSqueeze(index: number, assist: ArmedDivineAssist | null): void {
 function bind(): void {
   app.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => element.addEventListener("click", () => {
     const action = element.dataset.action;
-    const navigationAction = Boolean(action && ["home", "restaurant", "skills", "casinos", "lobby"].includes(action));
+    const navigationAction = Boolean(action && ["map", "restaurant", "skills", "casinos", "lobby"].includes(action));
     if (inlineWatchActive && !inlineWatchSettled && navigationAction) return;
     if (inlineWatchActive && inlineWatchSettled && navigationAction) resetInlineWatch();
-    if (view === "table" && action && ["home", "restaurant", "skills", "casinos", "lobby"].includes(action)) resetBetDraft(true);
-    if (action === "home") view = "home";
-    if (action === "restaurant") view = "restaurant";
-    if (action === "skills") view = "skills";
-    if (action === "casinos") view = "casino-select";
+    if (view === "table" && action && ["map", "restaurant", "skills", "casinos", "lobby"].includes(action)) resetBetDraft(true);
+    if (action === "map") view = "map";
+    if (action === "restaurant") { activeActivity = "restaurant"; view = "restaurant"; }
+    if (action === "skills") { activeActivity = "home"; view = "skills"; }
+    if (action === "casinos") { activeActivity = "casino"; view = "casino-select"; }
     if (action === "lobby") view = "lobby";
     if (action === "upgrade") game.upgradeRestaurant();
     if (action === "pawn" && confirm(`典当后餐厅将停止产出。确认典当并获得 ${money(game.restaurantInfo().pawn)}？`)) game.pawnRestaurant();
@@ -1111,7 +1111,7 @@ window.addEventListener("keydown", (event) => {
 
 window.setInterval(() => {
   const atTable = view === "table" || view === "dealing";
-  const insideCasino = view === "lobby" || atTable;
+  const insideCasino = activeActivity === "casino";
   const paused = worldTimePaused();
   const tick = game.tickRealtime(Date.now(), atTable ? tableId : null, insideCasino, paused);
   if (tick.income > 0) game.notice = `餐厅到账 ${money(tick.income)}`;
@@ -1133,7 +1133,7 @@ window.setInterval(() => {
   }
   const restaurantProgress = document.querySelector<HTMLElement>("[data-restaurant-progress]");
   if (restaurantProgress) {
-    const bar = restaurantProgress.querySelector<HTMLElement>("span");
+    const bar = restaurantProgress.querySelector<HTMLElement>("i b");
     const label = restaurantProgress.querySelector<HTMLElement>("em");
     if (bar) bar.style.width = `${game.restaurant.cycleElapsedWorldMinutes / RESTAURANT_CYCLE_WORLD_MINUTES * 100}%`;
     if (label) label.textContent = `${worldMinutesRemaining} 游戏分钟后结算`;
