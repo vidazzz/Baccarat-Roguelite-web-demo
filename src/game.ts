@@ -1,5 +1,6 @@
 import {
   createRng,
+  cardValue,
   generateInfluencedRound,
   probabilityFor,
   type PatternId,
@@ -13,6 +14,7 @@ import {
   recognizeConfidenceRoads,
   recognizeDerivedConfidenceRoads,
   confidenceRoadStartColumn,
+  legalRoundCardCandidates,
   retargetRoundCard,
 } from "./domain";
 
@@ -50,6 +52,7 @@ export interface PendingRound {
   confidence: number;
   confidencePrediction: Side | null;
   confidenceBreakdown: ConfidenceBreakdown;
+  createdRoadPrediction: Side | null;
 }
 
 export interface RoadMark {
@@ -57,6 +60,25 @@ export interface RoadMark {
   startColumn: number;
   startRound: number;
 }
+
+export interface RoadCreationResolution {
+  predicted: Side;
+  actual: Outcome;
+  matched: boolean;
+  confidencePenalty: number;
+}
+
+export interface SettlementResult {
+  delta: number;
+  income: number;
+  roadCreation: RoadCreationResolution | null;
+}
+
+export type DivineCardType = "face" | "no-edge" | "two-edge" | "three-edge" | "four-edge";
+export type NextRoundEffect =
+  | { kind: "forecast"; outcome: Outcome; chance: number }
+  | { kind: "lose" }
+  | { kind: "all-in"; threshold: number; chance: number };
 
 export interface ConfidenceBreakdown {
   base: number;
@@ -138,11 +160,13 @@ export class Game {
   debugBaseConfidence = BASE_CONFIDENCE;
   tables = new Map<string, GameTable>();
   pending: PendingRound | null = null;
+  nextRoundEffect: NextRoundEffect | null = null;
   notice = "先看路，再下注。";
   private rng: Rng = createRng(20260729);
   private lastRealtimeAt = Date.now();
   private reservedWager = 0;
   private roadMarks = new Map<string, RoadMark>();
+  private roadCreations = new Map<string, Side[]>();
   private roundWinStreak = 0;
   private dailyBetProfit = new Map<number, number>();
 
@@ -210,6 +234,7 @@ export class Game {
       throw new Error("旁观前需取消暂存筹码");
     }
     const generated = generateInfluencedRound(this.rng, table.round + 1, table.history, { "long-banker": 0, "long-player": 0, "ping-pong": 0, none: 0 });
+    this.applyNextRoundEffect(generated.result, bet);
     const breakdown = this.calculateConfidence(tableId, bet, liquidAssetsBeforeBet);
     this.confidence = this.debugConfidenceForced ? 1 : breakdown.total;
     const prediction = breakdown.markedPatterns.find((pattern) => pattern.prediction === bet?.side)?.prediction ?? null;
@@ -220,8 +245,62 @@ export class Game {
       confidence: this.confidence,
       confidencePrediction: prediction,
       confidenceBreakdown: breakdown,
+      createdRoadPrediction: this.roadCreation(tableId),
     };
     return this.pending;
+  }
+
+  roadCreation(tableId: string): Side | null {
+    this.table(tableId);
+    return this.roadCreations.get(tableId)?.[0] ?? null;
+  }
+
+  setRoadCreation(tableId: string, side: Side | null): Side | null {
+    this.table(tableId);
+    if (side) this.roadCreations.set(tableId, [side]);
+    else this.roadCreations.delete(tableId);
+    return side;
+  }
+
+  roadCreationSequence(tableId: string): Side[] {
+    this.table(tableId);
+    return [...(this.roadCreations.get(tableId) ?? [])];
+  }
+
+  appendRoadCreation(tableId: string, side: Side): Side[] {
+    const sequence = this.roadCreationSequence(tableId);
+    sequence.push(side);
+    this.roadCreations.set(tableId, sequence);
+    return [...sequence];
+  }
+
+  updateRoadCreation(tableId: string, index: number, side: Side | null): Side[] {
+    const sequence = this.roadCreationSequence(tableId);
+    const targetIndex = Math.floor(index);
+    if (!Number.isFinite(index) || targetIndex < 0 || targetIndex > sequence.length) {
+      throw new Error("Invalid road creation index");
+    }
+    const updated = sequence.slice(0, targetIndex);
+    if (side) updated.push(side);
+    if (updated.length) this.roadCreations.set(tableId, updated);
+    else this.roadCreations.delete(tableId);
+    return [...updated];
+  }
+
+  roadAnalysisHistory(tableId: string): RoundResult[] {
+    const table = this.table(tableId);
+    const predictions = this.roadCreationSequence(tableId);
+    if (!predictions.length) return table.history;
+    const firstId = (table.history.at(-1)?.id ?? table.round) + 1;
+    return [...table.history, ...predictions.map((outcome, index): RoundResult => ({
+      id: firstId + index,
+      outcome,
+      bankerCards: [],
+      playerCards: [],
+      bankerPoints: 0,
+      playerPoints: 0,
+      natural: false,
+    }))];
   }
 
   markRoad(tableId: string, roadBook: RoadBook, startColumn: number, startRound: number): RoadMark {
@@ -236,8 +315,7 @@ export class Game {
   }
 
   markCurrentBeadRoad(tableId: string): ConfidenceRoadPattern[] {
-    const table = this.table(tableId);
-    const patterns = recognizeConfidenceRoads(table.history, "bead");
+    const patterns = recognizeConfidenceRoads(this.roadAnalysisHistory(tableId), "bead");
     const key = `${tableId}:bead`;
     this.roadMarks.set(key, { roadBook: "bead", startColumn: 0, startRound: 0 });
     return this.uniqueRoadPatterns(patterns);
@@ -255,20 +333,21 @@ export class Game {
   }
 
   markedRoadPatterns(tableId: string): ConfidenceRoadPattern[] {
-    const table = this.table(tableId);
+    this.table(tableId);
+    const history = this.roadAnalysisHistory(tableId);
     const patterns: ConfidenceRoadPattern[] = [];
     const beadMark = this.roadMark(tableId, "bead");
-    if (beadMark) patterns.push(...recognizeConfidenceRoads(table.history, "bead"));
+    if (beadMark) patterns.push(...recognizeConfidenceRoads(history, "bead"));
     const bigMark = this.roadMark(tableId, "big");
-    const bigStart = confidenceRoadStartColumn(table.history, "big");
+    const bigStart = confidenceRoadStartColumn(history, "big");
     if (bigMark && bigStart !== null && bigMark.startColumn === bigStart) {
-      patterns.push(...recognizeConfidenceRoads(table.history, "big"));
+      patterns.push(...recognizeConfidenceRoads(history, "big"));
     }
     for (const roadBook of ["big-eye", "small", "cockroach"] as const) {
       const mark = this.roadMark(tableId, roadBook);
-      const exactStart = confidenceRoadStartColumn(table.history, roadBook);
+      const exactStart = confidenceRoadStartColumn(history, roadBook);
       if (!mark || exactStart === null || mark.startColumn !== exactStart) continue;
-      patterns.push(...recognizeDerivedConfidenceRoads(table.history, roadBook, 0));
+      patterns.push(...recognizeDerivedConfidenceRoads(history, roadBook, 0));
     }
     return this.uniqueRoadPatterns(patterns);
   }
@@ -346,6 +425,76 @@ export class Game {
     return shouldMatch && matched;
   }
 
+  applyDivineCardType(side: Side, handIndex: number, type: DivineCardType): boolean {
+    if (!this.pending || this.rng.next() >= 0.72) return false;
+    const candidates = legalRoundCardCandidates(this.pending.result, side, handIndex)
+      .filter((candidate) => {
+        const card = (side === "player" ? candidate.playerCards : candidate.bankerCards)[handIndex];
+        return card ? this.divineCardType(card.rank) === type : false;
+      });
+    if (!candidates.length) return false;
+    Object.assign(this.pending.result, candidates[Math.min(Math.floor(this.rng.next() * candidates.length), candidates.length - 1)]!);
+    return true;
+  }
+
+  applyDivineCall(side: Side, handIndex: number, call: "draw" | "blow"): boolean {
+    if (!this.pending?.bet || this.rng.next() >= 0.78) return false;
+    const target = this.pending.bet.side;
+    const candidates = legalRoundCardCandidates(this.pending.result, side, handIndex)
+      .filter((candidate) => candidate.outcome === target);
+    if (!candidates.length) return false;
+    const preferred = candidates.filter((candidate) => {
+      const card = (side === "player" ? candidate.playerCards : candidate.bankerCards)[handIndex];
+      const value = card ? cardValue(card) : 0;
+      return call === "draw" ? value >= 5 : value <= 4;
+    });
+    const pool = preferred.length ? preferred : candidates;
+    Object.assign(this.pending.result, pool[Math.min(Math.floor(this.rng.next() * pool.length), pool.length - 1)]!);
+    return true;
+  }
+
+  setNextRoundEffect(effect: NextRoundEffect): void {
+    this.nextRoundEffect = effect;
+  }
+
+  private divineCardType(rank: number): DivineCardType {
+    if (rank >= 10) return "face";
+    if (rank === 1) return "no-edge";
+    if (rank <= 3) return "two-edge";
+    if (rank <= 6) return "three-edge";
+    return "four-edge";
+  }
+
+  private forceRoundOutcome(result: RoundResult, target: Outcome): boolean {
+    const entries: { side: Side; handIndex: number }[] = [
+      { side: "banker", handIndex: result.bankerCards.length - 1 },
+      { side: "player", handIndex: result.playerCards.length - 1 },
+    ];
+    for (const entry of entries) {
+      const candidates = legalRoundCardCandidates(result, entry.side, entry.handIndex).filter((candidate) => candidate.outcome === target);
+      if (!candidates.length) continue;
+      Object.assign(result, candidates[Math.min(Math.floor(this.rng.next() * candidates.length), candidates.length - 1)]!);
+      return true;
+    }
+    return false;
+  }
+
+  private applyNextRoundEffect(result: RoundResult, bet: { side: Outcome; amount: number } | null): void {
+    const effect = this.nextRoundEffect;
+    if (!effect || !bet) return;
+    this.nextRoundEffect = null;
+    if (effect.kind === "forecast") {
+      if (this.rng.next() < effect.chance) this.forceRoundOutcome(result, effect.outcome);
+      return;
+    }
+    if (effect.kind === "lose") {
+      const loss = bet.side === "banker" ? "player" : "banker";
+      this.forceRoundOutcome(result, loss);
+      return;
+    }
+    if (bet.amount >= effect.threshold && this.rng.next() < effect.chance) this.forceRoundOutcome(result, bet.side);
+  }
+
   setDebugConfidenceForced(enabled: boolean): void {
     this.debugConfidenceForced = enabled;
     this.refreshDebugConfidence();
@@ -389,9 +538,9 @@ export class Game {
     return true;
   }
 
-  settle(): { delta: number; income: number } {
+  settle(): SettlementResult {
     if (!this.pending) throw new Error("No pending round");
-    const { tableId, result, bet } = this.pending;
+    const { tableId, result, bet, createdRoadPrediction } = this.pending;
     const table = this.table(tableId);
     table.history.push(result);
     table.round += 1;
@@ -415,8 +564,23 @@ export class Game {
       else if (delta < 0) this.roundWinStreak = 0;
     }
 
+    let roadCreation: RoadCreationResolution | null = null;
+    if (createdRoadPrediction) {
+      const matched = result.outcome === createdRoadPrediction;
+      const confidencePenalty = matched ? 0 : 0.05;
+      roadCreation = { predicted: createdRoadPrediction, actual: result.outcome, matched, confidencePenalty };
+      if (matched) {
+        const remaining = this.roadCreationSequence(tableId).slice(1);
+        if (remaining.length) this.roadCreations.set(tableId, remaining);
+        else this.roadCreations.delete(tableId);
+      } else {
+        this.roadCreations.delete(tableId);
+      }
+      if (!matched && !this.debugConfidenceForced) this.confidence = Math.max(0, this.confidence - confidencePenalty);
+    }
+
     this.pending = null;
-    return { delta, income: 0 };
+    return { delta, income: 0, roadCreation };
   }
 
   tickRealtime(now: number, pausedTableId: string | null, insideCasino = false, worldTimePaused = false): { income: number; tablesAdvanced: number; advancedTableIds: string[] } {

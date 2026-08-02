@@ -147,6 +147,42 @@ describe("baccarat domain", () => {
     expect(roads.cockroach.length).toBeGreaterThan(0);
   });
 
+  it("uses canonical red-blue boundaries for a derived road", () => {
+    const colors = (sequence: string) => makeDerivedRoads(
+      sequence.split("").map((value, index) => round(value === "B" ? "banker" : "player", index)),
+    ).bigEye.map((cell) => cell.color);
+
+    expect(colors("BPB")).toEqual(["red"]);
+    expect(colors("BBPP")).toEqual(["red"]);
+    expect(colors("BBPPP")).toEqual(["red", "blue"]);
+    expect(colors("BBPPPP")).toEqual(["red", "blue", "red"]);
+  });
+
+  it("starts the three derived roads at their standard logical columns", () => {
+    const history = "BPBPB".split("").map((value, index) => round(value === "B" ? "banker" : "player", index));
+    const roads = makeDerivedRoads(history);
+
+    expect(roads.bigEye.map((cell) => cell.roundIndex)).toEqual([2, 3, 4]);
+    expect(roads.small.map((cell) => cell.roundIndex)).toEqual([3, 4]);
+    expect(roads.cockroach.map((cell) => cell.roundIndex)).toEqual([4]);
+    expect(roads.bigEye.every((cell) => cell.color === "red")).toBe(true);
+    expect(roads.small.every((cell) => cell.color === "red")).toBe(true);
+    expect(roads.cockroach.every((cell) => cell.color === "red")).toBe(true);
+  });
+
+  it("ignores ties and keeps long-road turns in their logical column", () => {
+    const outcomes: RoundResult["outcome"][] = [
+      "banker", "banker", "banker", "banker", "banker", "banker", "banker", "banker",
+      "tie", "player", "banker",
+    ];
+    const history = outcomes.map((outcome, index) => round(outcome, index));
+    const colors = makeDerivedRoads(history).bigEye.map((cell) => cell.color);
+
+    // 第三逻辑列的首格比较前两列高度 1 与 8，应为蓝；
+    // 第一段长龙虽在大路第六行转弯，仍只算一个逻辑列。
+    expect(colors).toEqual(["blue"]);
+  });
+
   it("predicts derived marks for banker and player questions", () => {
     const history = ["banker", "banker", "player", "player", "banker", "player", "banker"]
       .map((outcome, index) => round(outcome as RoundResult["outcome"], index));

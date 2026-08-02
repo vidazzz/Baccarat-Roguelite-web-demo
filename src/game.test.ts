@@ -193,17 +193,155 @@ describe("confidence settlement", () => {
     expect(game.roadMark(table.id, "small")).toBeNull();
   });
 
+  it("projects one created result into every road calculation and lets it form a marked road", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = Array.from({ length: 4 }, (_, index) => historyRound("banker", index));
+
+    game.setRoadCreation(table.id, "banker");
+    expect(game.roadCreation(table.id)).toBe("banker");
+    expect(game.roadAnalysisHistory(table.id).map((round) => round.outcome)).toEqual([
+      "banker", "banker", "banker", "banker", "banker",
+    ]);
+
+    game.markRoad(table.id, "big", 0, 0);
+    expect(game.markedRoadPatterns(table.id).some((pattern) => pattern.id === "long-banker")).toBe(true);
+    const pending = game.play(table.id, { side: "banker", amount: 100 });
+    expect(pending.createdRoadPrediction).toBe("banker");
+    expect(pending.confidenceBreakdown.markedPatternBonus).toBeCloseTo(0.05);
+  });
+
+  it("projects a continuous created-road sequence in order", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = [historyRound("banker", 0)];
+
+    game.appendRoadCreation(table.id, "player");
+    game.appendRoadCreation(table.id, "banker");
+    game.appendRoadCreation(table.id, "player");
+
+    expect(game.roadCreationSequence(table.id)).toEqual(["player", "banker", "player"]);
+    expect(game.roadAnalysisHistory(table.id).map((round) => round.outcome)).toEqual([
+      "banker", "player", "banker", "player",
+    ]);
+  });
+
+  it("replaces an earlier created result and removes every result after it", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    game.appendRoadCreation(table.id, "banker");
+    game.appendRoadCreation(table.id, "player");
+    game.appendRoadCreation(table.id, "banker");
+
+    expect(game.updateRoadCreation(table.id, 1, "banker")).toEqual(["banker", "banker"]);
+    expect(game.roadCreationSequence(table.id)).toEqual(["banker", "banker"]);
+  });
+
+  it("cancels an earlier created result together with every result after it", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    game.appendRoadCreation(table.id, "banker");
+    game.appendRoadCreation(table.id, "player");
+    game.appendRoadCreation(table.id, "banker");
+
+    expect(game.updateRoadCreation(table.id, 1, null)).toEqual(["banker"]);
+    expect(game.roadCreationSequence(table.id)).toEqual(["banker"]);
+  });
+
+  it("clears a missed created road and immediately removes five confidence points", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = [];
+    game.setDebugBaseConfidence(0.4);
+    game.setRoadCreation(table.id, "player");
+    const pending = game.play(table.id, null);
+    pending.result.outcome = "banker";
+
+    const settlement = game.settle();
+
+    expect(settlement.roadCreation).toEqual({
+      predicted: "player",
+      actual: "banker",
+      matched: false,
+      confidencePenalty: 0.05,
+    });
+    expect(game.roadCreation(table.id)).toBeNull();
+    expect(game.confidence).toBeCloseTo(0.35);
+  });
+
+  it("consumes a matching created road without a confidence penalty", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = [];
+    game.setDebugBaseConfidence(0.4);
+    game.setRoadCreation(table.id, "banker");
+    const pending = game.play(table.id, null);
+    pending.result.outcome = "banker";
+
+    const settlement = game.settle();
+
+    expect(settlement.roadCreation?.matched).toBe(true);
+    expect(settlement.roadCreation?.confidencePenalty).toBe(0);
+    expect(game.roadCreation(table.id)).toBeNull();
+    expect(game.confidence).toBeCloseTo(0.4);
+  });
+
+  it("only consumes the first created result after a match", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = [];
+    game.appendRoadCreation(table.id, "banker");
+    game.appendRoadCreation(table.id, "player");
+    const pending = game.play(table.id, null);
+    pending.result.outcome = "banker";
+
+    const settlement = game.settle();
+
+    expect(settlement.roadCreation?.matched).toBe(true);
+    expect(game.roadCreationSequence(table.id)).toEqual(["player"]);
+    expect(game.roadCreation(table.id)).toBe("player");
+  });
+
+  it("clears the full created sequence after the first result misses", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = [];
+    game.setDebugBaseConfidence(0.4);
+    game.appendRoadCreation(table.id, "player");
+    game.appendRoadCreation(table.id, "banker");
+    const pending = game.play(table.id, null);
+    pending.result.outcome = "banker";
+
+    const settlement = game.settle();
+
+    expect(settlement.roadCreation?.matched).toBe(false);
+    expect(game.roadCreationSequence(table.id)).toEqual([]);
+    expect(game.confidence).toBeCloseTo(0.35);
+  });
+
+  it("consumes a special-event next-round effect after it is applied", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    game.setNextRoundEffect({ kind: "lose" });
+
+    const pending = game.play(table.id, { side: "banker", amount: 100 });
+
+    expect(pending.result.outcome).toBe("player");
+    expect(game.nextRoundEffect).toBeNull();
+  });
+
   it("marks the whole bead plate regardless of whether the next-cell row forms a road", () => {
     const game = new Game();
     const table = game.table("harbor-1");
     table.history = Array.from({ length: 24 }, (_, index) => historyRound(index % 6 === 0 ? "banker" : "player", index));
 
     expect(game.markCurrentBeadRoad(table.id).some((road) => road.id === "diamond-banker")).toBe(true);
-    expect(game.roadMark(table.id, "bead")).not.toBeNull();
+    expect(game.roadMark(table.id, "bead")).toEqual({ roadBook: "bead", startColumn: 0, startRound: 0 });
 
     table.history = [historyRound("banker", 1), historyRound("player", 2), historyRound("banker", 3)];
+    game.markRoad(table.id, "bead", 3, 18);
     expect(game.markCurrentBeadRoad(table.id)).toEqual([]);
-    expect(game.roadMark(table.id, "bead")).not.toBeNull();
+    expect(game.roadMark(table.id, "bead")).toEqual({ roadBook: "bead", startColumn: 0, startRound: 0 });
   });
 
   it("advances the absolute bead offset when cached history is trimmed", () => {

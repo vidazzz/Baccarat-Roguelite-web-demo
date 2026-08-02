@@ -1,5 +1,6 @@
 import * as THREE from "three";
-import { isRedCard, pipLayout, rankLabel, suitSymbol, type Card, type Side } from "./domain";
+import { cardFaceAsset } from "./card-assets";
+import { type Card, type Side } from "./domain";
 
 export interface TableCard {
   card: Card;
@@ -147,8 +148,8 @@ export class TableScene {
     rail.rotation.z = Math.PI;
     rail.position.z = -0.35;
     this.scene.add(rail);
-    this.addCardArea("闲家牌位", "PLAYER HAND", 0x3d9ed6, -2.55);
-    this.addCardArea("庄家牌位", "BANKER HAND", 0xd64a50, 2.55);
+    this.addCardArea("PLAYER", 0x77c5ed, -2.25);
+    this.addCardArea("BANKER", 0xef9b87, 2.25);
     this.addCardShoe();
     window.addEventListener("resize", this.resize);
     this.resize();
@@ -234,6 +235,34 @@ export class TableScene {
     this.squeezeProgress = 1;
     this.onSqueezeProgress(1);
     this.completeSqueeze();
+  }
+
+  divineMashStep(edge: "short" | "long", progress: number): void {
+    if (this.squeezeIndex === null || this.squeezeCompleting) return;
+    const entry = this.cards[this.squeezeIndex]!;
+    this.foldNormal.set(edge === "short" ? 0 : -1, edge === "short" ? -1 : 0);
+    this.fingerDirection.set(edge === "short" ? -1 : 0, edge === "short" ? 0 : -1);
+    this.squeezeProgress = THREE.MathUtils.clamp(progress, 0, 1);
+    this.foldOffset = this.foldSupport(this.foldNormal) * (1 - this.squeezeProgress);
+    entry.face.visible = false;
+    entry.flapBack.visible = true;
+    entry.flapFace.visible = true;
+    entry.finger.visible = true;
+    this.updateSqueezeTexture();
+  }
+
+  resetDivineMash(): void {
+    if (this.squeezeIndex === null || this.squeezeCompleting) return;
+    const entry = this.cards[this.squeezeIndex]!;
+    this.squeezeProgress = 0;
+    this.foldOffset = this.foldSupport(this.foldNormal);
+    entry.face.visible = false;
+    entry.flapBack.visible = false;
+    entry.flapFace.visible = false;
+    entry.finger.visible = false;
+    entry.back.visible = true;
+    entry.back.material.map = entry.originalBackMap;
+    entry.back.material.needsUpdate = true;
   }
 
   resumeSqueezeAndComplete(): void {
@@ -340,10 +369,10 @@ export class TableScene {
     group.rotation.x = -Math.PI / 2;
     const geometry = new THREE.PlaneGeometry(1.15, 1.7);
     const back = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: this.backTexture(), side: THREE.DoubleSide }));
-    const face = new THREE.Mesh(geometry.clone(), new THREE.MeshBasicMaterial({ map: this.faceTexture(entry.card), side: THREE.DoubleSide }));
+    const face = new THREE.Mesh(geometry.clone(), new THREE.MeshBasicMaterial({ map: this.faceTexture(entry.card), side: THREE.DoubleSide, transparent: true }));
     const flapGeometry = new THREE.BufferGeometry();
     const flapBack = new THREE.Mesh(flapGeometry, new THREE.MeshBasicMaterial({ map: back.material.map, side: THREE.FrontSide }));
-    const flapFace = new THREE.Mesh(flapGeometry, new THREE.MeshBasicMaterial({ map: this.mirroredTexture(face.material.map!), side: THREE.BackSide }));
+    const flapFace = new THREE.Mesh(flapGeometry, new THREE.MeshBasicMaterial({ map: this.mirroredTexture(face.material.map!), side: THREE.BackSide, transparent: true }));
     const finger = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xc58f72, side: THREE.DoubleSide, transparent: true }));
     face.position.z = -0.004;
     face.visible = revealed;
@@ -514,8 +543,9 @@ export class TableScene {
       entry.revealCanvas.width = backCanvas.width;
       entry.revealCanvas.height = backCanvas.height;
       entry.revealTexture = this.canvasTexture(entry.revealCanvas);
-      entry.back.material.map = entry.revealTexture;
     }
+    entry.back.material.map = entry.revealTexture;
+    entry.back.material.needsUpdate = true;
     const canvas = entry.revealCanvas;
     const ctx = canvas.getContext("2d")!;
     const width = canvas.width;
@@ -708,27 +738,25 @@ export class TableScene {
     requestAnimationFrame(settleFace);
   };
 
-  private addCardArea(label: string, subtitle: string, color: number, x: number): void {
+  private addCardArea(label: string, color: number, x: number): void {
     const canvas = document.createElement("canvas");
-    canvas.width = 1024;
-    canvas.height = 560;
+    canvas.width = 1260;
+    canvas.height = 920;
     const ctx = canvas.getContext("2d")!;
     ctx.strokeStyle = "rgba(238,228,193,.58)";
-    ctx.lineWidth = 8;
-    ctx.strokeRect(8, 8, 1008, 544);
+    ctx.lineWidth = 6;
+    ctx.strokeRect(100, 200, 460, 680);
+    ctx.strokeRect(700, 200, 460, 680);
     ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
-    ctx.font = "800 82px serif";
+    ctx.font = "700 54px Arial, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(label, 512, 100);
-    ctx.fillStyle = "rgba(238,228,193,.78)";
-    ctx.font = "700 38px sans-serif";
-    ctx.fillText(subtitle, 512, 158);
+    ctx.fillText(label, 630, 120);
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     this.textures.push(texture);
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(4.7, 2.6), new THREE.MeshBasicMaterial({ map: texture, transparent: true }));
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(3.15, 2.3), new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }));
     mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(x, 0.014, -0.75);
+    mesh.position.set(x, 0.014, -0.92);
     this.scene.add(mesh);
   }
 
@@ -753,60 +781,15 @@ export class TableScene {
     canvas.width = 480;
     canvas.height = 720;
     const ctx = canvas.getContext("2d")!;
-    ctx.fillStyle = "#f8f3e8";
-    ctx.fillRect(0, 0, 480, 720);
-    ctx.strokeStyle = "#c8bba0";
-    ctx.lineWidth = 10;
-    ctx.strokeRect(12, 12, 456, 696);
-    const color = isRedCard(card) ? "#ad2930" : "#151917";
-    ctx.fillStyle = color;
-    const rank = rankLabel(card);
-    const suit = suitSymbol(card);
-    const drawCorner = (inverted: boolean) => {
-      ctx.save();
-      if (inverted) { ctx.translate(480, 720); ctx.rotate(Math.PI); }
-      ctx.textAlign = "center";
-      ctx.font = "700 63px Georgia";
-      ctx.fillText(rank, 48, 70);
-      ctx.font = "700 48px Georgia";
-      ctx.fillText(suit, 48, 119);
-      ctx.restore();
-    };
-    drawCorner(false);
-    drawCorner(true);
-    if (card.rank >= 11) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 7;
-      ctx.strokeRect(112, 122, 256, 476);
-      ctx.fillStyle = "#d5aa50";
-      ctx.fillRect(124, 134, 232, 452);
-      ctx.fillStyle = color;
-      ctx.fillRect(139, 149, 202, 422);
-      ctx.fillStyle = "#f8f3e8";
-      ctx.textAlign = "center";
-      ctx.font = "700 105px Georgia";
-      ctx.fillText(rank, 240, 284);
-      ctx.font = "700 118px Georgia";
-      ctx.fillText(suit, 240, 422);
-      ctx.save();
-      ctx.translate(480, 720);
-      ctx.rotate(Math.PI);
-      ctx.font = "700 105px Georgia";
-      ctx.fillText(rank, 240, 284);
-      ctx.restore();
-    } else {
-      for (const pip of pipLayout(card.rank)) {
-        ctx.save();
-        ctx.translate(pip.x * 480, pip.y * 720);
-        if (pip.inverted) ctx.rotate(Math.PI);
-        ctx.font = `700 ${card.rank === 1 ? 176 : card.rank >= 8 ? 68 : 82}px Georgia`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(suit, 0, 0);
-        ctx.restore();
-      }
-    }
-    return this.canvasTexture(canvas);
+    const texture = this.canvasTexture(canvas);
+    const image = new Image();
+    image.addEventListener("load", () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      texture.needsUpdate = true;
+    }, { once: true });
+    image.src = cardFaceAsset(card.rank);
+    return texture;
   }
 
   private backTexture(): THREE.CanvasTexture {

@@ -3,8 +3,9 @@ import casinoAsset from "./casino.jpg";
 import homeAsset from "./home.jpg";
 import mapAsset from "./map.jpg";
 import restaurantAsset from "./restaurant.jpg";
-import { cardLabel, cardValue, confidenceRoadStartColumn, divineCallForRound, forecastBaccaratReveal, isRedCard, makeBeadPlate, makeBigRoad, makeDerivedRoads, pipLayout, predictRoadColors, rankLabel, suitSymbol, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type Outcome, type RoadBook, type Side } from "./domain";
-import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps, skillDefinitions, type Casino, type GameTable, type PendingRound, type SkillId } from "./game";
+import { cardFaceAsset } from "./card-assets";
+import { cardLabel, cardValue, confidenceRoadStartColumn, forecastBaccaratReveal, makeBeadPlate, makeBigRoad, makeDerivedRoads, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type DerivedRoadColor, type Outcome, type RoadBook, type RoundResult, type Side } from "./domain";
+import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps, skillDefinitions, type Casino, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
 import { TableScene } from "./table-scene";
 
 type View = "map" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
@@ -21,13 +22,15 @@ let stagedBetSide: Outcome | null = null;
 let selectedChip = 100;
 let betDraftNotice = "选择筹码后，点击下注区落注";
 let tableScene: TableScene | null = null;
-let lastSettlement: { delta: number; income: number } | null = null;
+let lastSettlement: SettlementResult | null = null;
 let lastRound: PendingRound | null = null;
 let viewTimers: number[] = [];
 let dealStage: DealStage = "animating";
 let revealedCardIndices = new Set<number>();
 let divineCheckedStages = new Set<number>();
 let divineRevealFeedback = new Map<number, { hit: boolean; target: Outcome; probability: number }>();
+let divineActivationsThisRound = 0;
+let divineSpecialPending = false;
 let dealtCardCount = 4;
 let debugMenuOpen = false;
 let tablePlayerInteractionActive = false;
@@ -35,12 +38,84 @@ let inlineWatchActive = false;
 let inlineWatchStep = 0;
 let inlineWatchSettled = false;
 let roadMarkFeedback: { message: string; debug: string } | null = null;
+let roadCreationFailure: RoadCreationResolution | null = null;
 
 const money = (value: number) => `¥${Math.floor(value).toLocaleString("zh-CN")}`;
 const outcomeName = (outcome: Outcome) => ({ banker: "庄", player: "闲", tie: "和" })[outcome];
 const chipDenominations = (casino: Casino) => [1, 2, 5, 10, 20].map((multiple) => casino.minBet * multiple).filter((value) => value <= casino.maxBet);
 const roadBooks: RoadBook[] = ["bead", "big", "big-eye", "small", "cockroach"];
+const SHOW_LAST_CARD_FORECAST = false;
 const markedRoadBookCount = (currentTableId: string) => roadBooks.filter((roadBook) => game.roadMark(currentTableId, roadBook)).length;
+
+interface RoadPreviewCell {
+  side: Side;
+  row: number;
+  column: number;
+  color: DerivedRoadColor;
+  creationIndex: number;
+}
+
+const appendHypotheticalRound = (table: GameTable, history: RoundResult[], side: Side): RoundResult[] => [...history, {
+  id: (history.at(-1)?.id ?? table.round) + 1,
+  outcome: side,
+  bankerCards: [],
+  playerCards: [],
+  bankerPoints: 0,
+  playerPoints: 0,
+  natural: false,
+}];
+
+function roadPreviewCell(table: GameTable, roadBook: RoadBook, history: RoundResult[], side: Side, creationIndex: number): RoadPreviewCell | null {
+  const projected = appendHypotheticalRound(table, history, side);
+  if (roadBook === "bead") {
+    const cell = makeBeadPlate(projected, table.historyOffset).at(-1)!;
+    return { side, row: cell.row, column: cell.column, color: side === "banker" ? "red" : "blue", creationIndex };
+  }
+  if (roadBook === "big") {
+    const cell = makeBigRoad(projected).at(-1)!;
+    return { side, row: cell.row, column: cell.column, color: side === "banker" ? "red" : "blue", creationIndex };
+  }
+  const current = makeDerivedRoads(history);
+  const next = makeDerivedRoads(projected);
+  const key = roadBook === "big-eye" ? "bigEye" : roadBook;
+  if (next[key].length <= current[key].length) return null;
+  const cell = next[key].at(-1)!;
+  return { side, row: cell.row, column: cell.column, color: cell.color, creationIndex };
+}
+
+function roadPreviewCells(table: GameTable, roadBook: RoadBook): RoadPreviewCell[] {
+  const sequence = game.roadCreationSequence(table.id);
+  const history = sequence.reduce((projected, side) => appendHypotheticalRound(table, projected, side), table.history);
+  return (["banker", "player"] as const)
+    .map((side) => roadPreviewCell(table, roadBook, history, side, sequence.length))
+    .filter((cell): cell is RoadPreviewCell => cell !== null);
+}
+
+function roadCreatedCells(table: GameTable, roadBook: RoadBook): RoadPreviewCell[] {
+  let history = table.history;
+  const cells: RoadPreviewCell[] = [];
+  for (const [creationIndex, side] of game.roadCreationSequence(table.id).entries()) {
+    const cell = roadPreviewCell(table, roadBook, history, side, creationIndex);
+    if (cell) cells.push(cell);
+    history = appendHypotheticalRound(table, history, side);
+  }
+  return cells;
+}
+
+function roadCreationTargets(table: GameTable, roadBook: RoadBook, visibleFrom: number): string {
+  const targets = new Map<string, RoadPreviewCell>();
+  for (const cell of roadCreatedCells(table, roadBook)) targets.set(`${cell.creationIndex}:${cell.row}:${cell.column}`, cell);
+  for (const cell of roadPreviewCells(table, roadBook)) {
+    const key = `${cell.creationIndex}:${cell.row}:${cell.column}`;
+    if (!targets.has(key)) targets.set(key, cell);
+  }
+  const creationCount = game.roadCreationSequence(table.id).length;
+  return [...targets.values()].filter((cell) => cell.column >= visibleFrom).map((cell) => {
+    const existing = cell.creationIndex < creationCount;
+    const existingAction = roadBook === "bead" ? "修改" : "撤销";
+    return `<button type="button" class="road-create-cell ${existing ? "created-road-edit" : ""}" data-road-create-book="${roadBook}" data-road-side="${cell.side}" data-road-color="${cell.color}" data-creation-index="${cell.creationIndex}" data-row="${cell.row}" data-column="${cell.column}" style="--row:${cell.row};--col:${cell.column - visibleFrom}" aria-label="${existing ? `${existingAction}第 ${cell.creationIndex + 1} 局创造路数` : "继续创造下一局路数"}"></button>`;
+  }).join("");
+}
 
 function resetBetDraft(refund = true): void {
   if (refund) game.cancelReservedBet();
@@ -72,19 +147,21 @@ function shell(content: string): string {
 function roadMarkOverlay(table: GameTable, roadBook: RoadBook, visibleFrom: number, columns: number): string {
   const mark = game.roadMark(table.id, roadBook);
   if (!mark || mark.startColumn >= visibleFrom + columns) return "";
-  const start = roadBook === "bead" ? 0 : Math.max(0, mark.startColumn - visibleFrom);
+  const start = Math.max(0, mark.startColumn - visibleFrom);
   return `<span class="road-mark-range" style="--mark-start:${start}"></span>`;
 }
 
 function road(table: GameTable, compact = false, interactive = false): string {
   const cells = makeBigRoad(table.history);
-  const maxColumn = Math.max(...cells.map((cell) => cell.column), 0);
+  const previews = roadPreviewCells(table, "big");
+  const ghosts = roadCreatedCells(table, "big");
+  const maxColumn = Math.max(...cells.map((cell) => cell.column), ...previews.map((cell) => cell.column), ...ghosts.map((cell) => cell.column), 0);
   const columns = compact ? 12 : 28;
   const visibleFrom = Math.max(0, maxColumn - columns + 1);
-  return `<div class="road ${compact ? "compact" : ""} ${interactive ? "markable-road" : ""}" aria-label="${table.name} 大路" ${interactive ? `data-road-book="big" data-visible-from="${visibleFrom}" data-columns="${columns}"` : ""}>${roadMarkOverlay(table, "big", visibleFrom, columns)}${cells
+  return `<div class="road ${compact ? "compact" : ""} ${interactive ? "creatable-road" : ""}" aria-label="${table.name} 大路" data-road-window data-visible-from="${visibleFrom}" data-columns="${columns}">${roadMarkOverlay(table, "big", visibleFrom, columns)}${cells
     .filter((cell) => cell.column >= visibleFrom)
     .map((cell) => `<span class="road-dot ${cell.outcome} ${cell.ties ? "has-tie" : ""}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${cell.ties ? `<i>${cell.ties > 1 ? cell.ties : ""}</i>` : ""}</span>`)
-    .join("")}</div>`;
+    .join("")}${ghosts.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="road-dot created-road-ghost ${cell.side}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}${interactive ? roadCreationTargets(table, "big", visibleFrom) : ""}</div>`;
 }
 
 function roadStats(table: GameTable): string {
@@ -99,34 +176,30 @@ function roadStats(table: GameTable): string {
 type DerivedRoadKind = "big-eye" | "small-road" | "cockroach-road";
 
 function derivedRoad(table: GameTable, cells: DerivedRoadCell[], label: string, roadBook: RoadBook, kind: DerivedRoadKind, compact = false, interactive = false): string {
-  const maxColumn = Math.max(...cells.map((cell) => cell.column), 0);
+  const previews = roadPreviewCells(table, roadBook);
+  const ghosts = roadCreatedCells(table, roadBook);
+  const maxColumn = Math.max(...cells.map((cell) => cell.column), ...previews.map((cell) => cell.column), ...ghosts.map((cell) => cell.column), 0);
   const columns = compact ? 12 : 18;
   const visibleFrom = Math.max(0, maxColumn - columns + 1);
-  return `<div class="derived-block ${kind}"><div class="derived-label"><i class="road-symbol ${kind} red"></i>${label}</div><div class="derived-road ${compact ? "compact" : ""} ${interactive ? "markable-road" : ""}" style="--columns:${columns}" aria-label="${label}" ${interactive ? `data-road-book="${roadBook}" data-visible-from="${visibleFrom}" data-columns="${columns}"` : ""}>${roadMarkOverlay(table, roadBook, visibleFrom, columns)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="derived-mark ${cell.color}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}</div></div>`;
-}
-
-function roadQuestions(table: GameTable): string {
-  const banker = predictRoadColors(table.history, "banker");
-  const player = predictRoadColors(table.history, "player");
-  const mark = (color: "red" | "blue" | undefined, kind: DerivedRoadKind) => `<i class="road-symbol ${kind} ${color ?? "empty"}"></i>`;
-  const row = (label: string, values: typeof banker, side: Side) => `<div class="question-row ${side}"><b>${label}</b><span>${mark(values.bigEye, "big-eye")}${mark(values.small, "small-road")}${mark(values.cockroach, "cockroach-road")}</span></div>`;
-  return `<div class="road-questions"><strong>问路</strong>${row("闲问路", player, "player")}${row("庄问路", banker, "banker")}<small><i class="legend-red"></i>齐整 <i class="legend-blue"></i>不齐</small></div>`;
+  return `<div class="derived-block ${kind}"><div class="derived-label ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="${roadBook}" title="点击标题栏对应列标记路数"` : ""}><i class="road-symbol ${kind} red"></i>${label}</div><div class="derived-road ${compact ? "compact" : ""} ${interactive ? "creatable-road" : ""}" style="--columns:${columns}" aria-label="${label}" data-road-window data-visible-from="${visibleFrom}" data-columns="${columns}">${roadMarkOverlay(table, roadBook, visibleFrom, columns)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="derived-mark ${cell.color}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}${ghosts.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="derived-mark created-road-ghost ${cell.color}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}${interactive ? roadCreationTargets(table, roadBook, visibleFrom) : ""}</div></div>`;
 }
 
 function roadSheet(table: GameTable, compact = false, interactive = false): string {
   const derived = makeDerivedRoads(table.history);
-  const bead = `<section class="bead-road-panel"><div class="road-panel-heading"><i class="bead-symbol banker"></i>珠盘路</div>${beadPlate(table, interactive)}</section>`;
-  const big = `<section class="big-road-panel"><div class="road-panel-heading"><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive)}</section>`;
+  const bead = `<section class="bead-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="bead" title="点击标题栏标记整张珠盘路"` : ""}><i class="bead-symbol banker"></i>珠盘路</div>${beadPlate(table, interactive)}</section>`;
+  const big = `<section class="big-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="big" title="点击标题栏对应列标记路数"` : ""}><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive)}</section>`;
   const derivedRoads = `${derivedRoad(table, derived.bigEye, "大眼仔路", "big-eye", "big-eye", true, interactive)}${derivedRoad(table, derived.small, "小路", "small", "small-road", true, interactive)}${derivedRoad(table, derived.cockroach, "曱甴路", "cockroach", "cockroach-road", true, interactive)}`;
-  const info = `<aside class="road-info-panel">${roadStats(table)}${roadQuestions(table)}</aside>`;
+  const info = `<aside class="road-info-panel">${roadStats(table)}</aside>`;
   return `<div class="road-sheet road-sheet-desktop ${compact ? "compact" : ""}"><div class="road-board">${bead}${big}<div class="derived-grid">${derivedRoads}</div>${info}</div></div><div class="road-sheet road-sheet-mobile ${compact ? "compact" : ""}"><div class="mobile-road-stack">${bead}${big}<div class="derived-grid">${derivedRoads}</div>${info}</div></div>`;
 }
 
 function beadPlate(table: GameTable, interactive = false): string {
   const cells = makeBeadPlate(table.history, table.historyOffset);
-  const maxColumn = Math.max(...cells.map((cell) => cell.column), 0);
+  const previews = roadPreviewCells(table, "bead");
+  const ghosts = roadCreatedCells(table, "bead");
+  const maxColumn = Math.max(...cells.map((cell) => cell.column), ...previews.map((cell) => cell.column), ...ghosts.map((cell) => cell.column), 0);
   const visibleFrom = Math.max(0, maxColumn - 8);
-  return `<div class="bead-plate ${interactive ? "markable-road" : ""}" aria-label="${table.name} 珠盘路" ${interactive ? `data-road-book="bead"` : ""}>${roadMarkOverlay(table, "bead", visibleFrom, 9)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="bead ${cell.outcome}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${outcomeName(cell.outcome)}</span>`).join("")}</div>`;
+  return `<div class="bead-plate ${interactive ? "creatable-road" : ""}" aria-label="${table.name} 珠盘路" data-road-window data-visible-from="${visibleFrom}" data-columns="9">${roadMarkOverlay(table, "bead", visibleFrom, 9)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="bead ${cell.outcome}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${outcomeName(cell.outcome)}</span>`).join("")}${ghosts.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="bead created-road-ghost ${cell.side}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${outcomeName(cell.side)}</span>`).join("")}${interactive ? roadCreationTargets(table, "bead", visibleFrom) : ""}</div>`;
 }
 
 function mapView(): string {
@@ -151,6 +224,7 @@ function mapView(): string {
         </button>
         <div class="map-footer"><span>地图上的选择才会切换当前活动</span><b>餐厅在赌场外持续经营</b></div>
       </div>
+      ${roadCreationResolutionView()}
     </section>
   `);
 }
@@ -243,13 +317,7 @@ function lobbyTableContent(table: GameTable, casino: Casino): string {
 }
 
 function inlinePokerFace(card: Card): string {
-  const rank = rankLabel(card);
-  const suit = suitSymbol(card);
-  const corner = (inverted = false) => `<span class="poker-corner ${inverted ? "inverted" : ""}"><b>${rank}</b><i>${suit}</i></span>`;
-  const center = card.rank <= 10
-    ? `<span class="pip-field">${pipLayout(card.rank).map((pip) => `<i class="poker-pip ${pip.inverted ? "inverted" : ""}" style="left:${pip.x * 100}%;top:${pip.y * 100}%">${suit}</i>`).join("")}</span>`
-    : `<span class="court-card"><span>${rank}</span><i>${suit}</i><span>${rank}</span></span>`;
-  return `<span class="poker-face ${isRedCard(card) ? "red" : ""}">${corner()}${center}${corner(true)}</span>`;
+  return `<img class="poker-face-art" src="${cardFaceAsset(card.rank)}" alt="${cardLabel(card)}">`;
 }
 
 function inlineWatchState(pending: PendingRound) {
@@ -263,7 +331,7 @@ function inlineWatchHand(pending: PendingRound, side: Side): string {
   const sequence = dealSequence(pending);
   const state = inlineWatchState(pending);
   const cards = sequence.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.side === side);
-  return `<div class="inline-watch-hand ${side}"><span>${outcomeName(side)}家牌位</span><div class="inline-watch-cards">${cards.map(({ entry, index }) => {
+  return `<div class="inline-watch-hand ${side}"><span>${side === "player" ? "PLAYER" : "BANKER"}</span><div class="inline-watch-cards">${cards.map(({ entry, index }) => {
     if (!state.dealt.has(index)) return entry.handIndex < 2 ? `<i class="watch-card-slot"></i>` : "";
     const currentDeal = state.current?.kind === "deal" && state.current.cardIndex === index;
     const currentReveal = state.current?.kind === "reveal" && state.current.cardIndex === index;
@@ -290,6 +358,8 @@ function tableView(): string {
   if (!denominations.includes(selectedChip)) selectedChip = denominations[0] ?? casino.minBet;
   const markedPatterns = game.markedRoadPatterns(table.id);
   const markedBookCount = markedRoadBookCount(table.id);
+  const createdRoads = game.roadCreationSequence(table.id);
+  const createdRoad = createdRoads[0] ?? null;
   const recognizedPatternList = markedPatterns.length
     ? `<div class="recognized-pattern-list">${markedPatterns.map((pattern) => `<span><b>${pattern.name}</b><i>预测${outcomeName(pattern.prediction)}</i></span>`).join("")}</div>`
     : "";
@@ -297,7 +367,7 @@ function tableView(): string {
     ? `<div class="road-mark-feedback" role="status"><span>${roadMarkFeedback.message}</span><code>DEBUG · ${roadMarkFeedback.debug}</code></div>`
     : "";
   const confidenceMessage = !stagedBetSide
-    ? "点击珠盘路、大路或下三路进行标记；信心在封盘后结算"
+    ? createdRoad ? `预想下一局${outcomeName(createdRoad)} · 信心待封盘结算` : "路数预判待定 · 信心待封盘结算"
     : `已押${outcomeName(stagedBetSide)} · 确认下注后才揭示信心变化`;
   const zone = (side: Outcome, english: string, odds: string, chance: number) => {
     const active = stagedBetSide === side && stagedAmount > 0;
@@ -315,7 +385,7 @@ function tableView(): string {
         <section class="betting-panel ${inlineWatchActive ? "inline-watching" : ""}">
           <div class="table-felt ${inlineWatchActive ? "watch-active" : ""}">
             <div class="table-session-meta"><span>${inlineWatchActive ? `旁观牌局 · ${inlineWatchStatus(watchPending!)}` : `限红 ${money(casino.minBet)} - ${money(casino.maxBet)}`}</span><button class="secondary" data-action="watch" ${inlineWatchActive ? "disabled" : ""}>旁观本局</button></div>
-            <div class="dealer-apron ${inlineWatchActive ? "inline-watch-apron" : ""}">${inlineWatchActive ? `${inlineWatchHand(watchPending!, "player")}<strong>${inlineWatchStatus(watchPending!)}</strong>${inlineWatchHand(watchPending!, "banker")}` : `<div><span>闲家牌位</span><i></i><i></i></div><strong>风云</strong><div><span>庄家牌位</span><i></i><i></i></div>`}</div>
+            <div class="dealer-apron ${inlineWatchActive ? "inline-watch-apron" : ""}">${inlineWatchActive ? `${inlineWatchHand(watchPending!, "player")}<strong>${inlineWatchStatus(watchPending!)}</strong>${inlineWatchHand(watchPending!, "banker")}` : `<div class="table-hand-placement player"><span>PLAYER</span><i></i><i></i></div><strong>风云</strong><div class="table-hand-placement banker"><span>BANKER</span><i></i><i></i></div>`}</div>
             <div class="bet-zones">${zone("player", "PLAYER", "1:1", probability.player)}${zone("tie", "TIE", "1:8", probability.tie)}${zone("banker", "BANKER", "1:0.95", probability.banker)}</div>
             ${watchResult ? `<div class="inline-watch-result ${watchResult.outcome}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭旁观结算"><i>${watchResult.outcome === "tie" ? "和" : outcomeName(watchResult.outcome)}</i><span>旁观结算</span><h2>${watchResult.outcome === "tie" ? "本局和局" : `${outcomeName(watchResult.outcome)}家胜`}</h2><p>庄 ${watchResult.bankerPoints} 点 · 闲 ${watchResult.playerPoints} 点</p><small>点击任意位置返回牌桌</small></div>` : ""}
           </div>
@@ -332,10 +402,16 @@ function tableView(): string {
             <div class="confidence-readout"><span>当前信心 ${Math.round(game.confidence * 100)}%</span><strong>${confidenceMessage}</strong></div>
           </div>
         </section>
-        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2><div class="road-mark-actions"><span class="pattern ${markedBookCount ? "active" : ""}">${markedBookCount ? `已标记 ${markedBookCount} 路 · DEBUG 有效 ${markedPatterns.length} 路` : "点击路书标记"}</span>${markedBookCount ? "<button class=\"clear-road-marks\" data-action=\"clear-road-marks\">全清标记</button>" : ""}</div></div>${roadFeedback}${recognizedPatternList}${roadSheet(table, false, true)}</aside>
+        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2><div class="road-mark-actions"><span class="road-creation-status ${createdRoad ? "active" : ""}">${createdRoad ? `已创造 ${createdRoads.length} 局 · 下一局${outcomeName(createdRoad)}` : "创造路数"}</span><span class="pattern ${markedBookCount ? "active" : ""}">${markedBookCount ? `已标记 ${markedBookCount} 路 · DEBUG 有效 ${markedPatterns.length} 路` : "未标记"}</span>${markedBookCount ? "<button class=\"clear-road-marks\" data-action=\"clear-road-marks\">全清标记</button>" : ""}</div></div>${roadFeedback}${recognizedPatternList}${roadSheet(table, false, !inlineWatchActive)}</aside>
       </div>
+      ${roadCreationResolutionView()}
     </section>
   `);
+}
+
+function roadCreationResolutionView(): string {
+  if (!roadCreationFailure || roadCreationFailure.matched) return "";
+  return `<div class="road-creation-failure" data-action="dismiss-road-creation-failure" role="button" tabindex="0" aria-label="关闭创造路数失败提示"><section><span>创造路数 · 预测失败</span><strong>路，不是这样走的！</strong><div><b>预想 ${outcomeName(roadCreationFailure.predicted)}</b><i>实际 ${outcomeName(roadCreationFailure.actual)}</i></div><em>信心 −${Math.round(roadCreationFailure.confidencePenalty * 100)}%</em><p>所有创造路数虚影已强制撤销</p><small>点击任意位置继续</small></section></div>`;
 }
 
 interface DealtCard {
@@ -446,6 +522,7 @@ function forecastRankLabel(group: ForecastRankGroup): string {
 }
 
 function currentCardForecast(pending: PendingRound): string {
+  if (!SHOW_LAST_CARD_FORECAST) return "";
   if (dealStage === "settled" || dealStage === "animating" || dealStage === "drawing-card") return "";
   const remaining = Array.from({ length: dealtCardCount }, (_, index) => index).filter((index) => !revealedCardIndices.has(index));
   if (remaining.length !== 1) return "";
@@ -623,6 +700,8 @@ function setupInlineWatch(): void {
     if (!settling) return;
     lastRound = settling;
     lastSettlement = game.settle();
+    roadCreationFailure = lastSettlement.roadCreation?.matched === false ? lastSettlement.roadCreation : null;
+    if (lastSettlement.roadCreation) roadMarkFeedback = null;
     inlineWatchSettled = true;
     render();
   }, 700));
@@ -644,6 +723,9 @@ function settleOnTable(): void {
   const pending = game.pending!;
   lastRound = pending;
   lastSettlement = game.settle();
+  roadCreationFailure = lastSettlement.roadCreation?.matched === false ? lastSettlement.roadCreation : null;
+  if (lastSettlement.roadCreation) roadMarkFeedback = null;
+  divineSpecialPending = divineActivationsThisRound >= 3 && lastSettlement.delta > 0;
   dealStage = "settled";
   view = game.gameOver ? "game-over" : "dealing";
   render();
@@ -666,6 +748,7 @@ function setupDealing(): void {
     }
   }, animateFromIndex, playerOwnedSide(pending));
   if (dealStage === "dealer-revealing") viewTimers.push(window.setTimeout(revealNextAutomatically, 280));
+  if (dealStage === "settled" && divineSpecialPending && !roadCreationFailure) viewTimers.push(window.setTimeout(showDivineSpecialEvent, 320));
 }
 
 function finishReveal(index: number): void {
@@ -719,11 +802,7 @@ function isStageFinalCard(index: number): boolean {
     && !revealedCardIndices.has(index);
 }
 
-interface ArmedDivineAssist {
-  target: Outcome;
-  low: number;
-  high: number;
-}
+interface ArmedDivineAssist { target: Outcome; }
 
 function armDivineAssist(index: number): ArmedDivineAssist | null {
   const pending = game.pending;
@@ -735,120 +814,146 @@ function armDivineAssist(index: number): ArmedDivineAssist | null {
   if (!info.target || !game.shouldTriggerDivineAssist()) {
     return null;
   }
-  return { target: info.target, low: info.low, high: info.high };
+  divineActivationsThisRound += 1;
+  return { target: info.target };
 }
 
-function startDivineGame(index: number, target: Outcome, low: number, high: number, proceed: () => void): void {
+function startDivineGame(index: number, target: Outcome): void {
   tablePlayerInteractionActive = true;
   const activation = document.createElement("div");
   activation.className = "divine-activation";
-  activation.innerHTML = `<div class="divine-activation-lines"></div><strong>神助发动</strong>`;
+  activation.innerHTML = `<div class="divine-activation-lines"></div><strong>这张牌！我感觉到了！！</strong>`;
   document.body.append(activation);
   document.body.classList.add("divine-activation-active");
   if ("vibrate" in navigator) navigator.vibrate([50, 24, 72, 28, 96]);
   window.setTimeout(() => {
     activation.remove();
     document.body.classList.remove("divine-activation-active");
-    runDivineGame(index, target, low, high, proceed);
+    chooseDivineCardType(index, target);
   }, 1000);
 }
 
-function runDivineGame(index: number, target: Outcome, low: number, high: number, proceed: () => void): void {
-  const targetCard = dealSequence(game.pending!)[index]!;
-  const call = divineCallForRound(game.pending!.result, targetCard.side, targetCard.handIndex, target);
-  const callWord = call.word;
-  const callMeaning = call.meaning;
+function chooseDivineCardType(index: number, target: Outcome): void {
   const overlay = document.createElement("div");
-  overlay.className = "divine-overlay";
-  overlay.innerHTML = `<div class="divine-heading"><span>神助 · 助你押中${outcomeName(target)}</span><strong>${Math.round(low * 100)}% <i>→</i> ${Math.round(high * 100)}%</strong></div><div class="divine-hit"><span class="divine-level"><i></i></span><strong class="divine-level-value">气势 24%</strong><b>${callWord}</b><small>${callMeaning} · 点击屏幕任意位置</small></div><div class="divine-timer"><i></i></div><span class="divine-time-value">剩余 3.2 秒</span><div class="divine-shouts"></div>`;
+  overlay.className = "divine-choice-overlay";
+  const choices: { type: DivineCardType; label: string; detail: string }[] = [
+    { type: "face", label: "公", detail: "人头牌" }, { type: "no-edge", label: "没边", detail: "A" },
+    { type: "two-edge", label: "两边", detail: "2 · 3" }, { type: "three-edge", label: "三边", detail: "4 · 5 · 6" },
+    { type: "four-edge", label: "四边", detail: "7 · 8 · 9" },
+  ];
+  overlay.innerHTML = `<section><span>神助一阶段 · 锁定牌型</span><h2>这张牌，要什么？</h2><p>选定牌型后，以连点挤牌把它挤出来。</p><div>${choices.map((choice) => `<button data-divine-type="${choice.type}"><b>${choice.label}</b><small>${choice.detail}</small></button>`).join("")}</div></section>`;
   document.body.append(overlay);
-  const levelBar = overlay.querySelector<HTMLElement>(".divine-level i")!;
-  const levelValue = overlay.querySelector<HTMLElement>(".divine-level-value")!;
-  const timerBar = overlay.querySelector<HTMLElement>(".divine-timer i")!;
-  const timeValue = overlay.querySelector<HTMLElement>(".divine-time-value")!;
-  const shouts = overlay.querySelector<HTMLElement>(".divine-shouts")!;
-  const duration = 3200;
-  const startedAt = performance.now();
-  let lastAt = startedAt;
-  let level = 0.24;
-  let ended = false;
-  let callCount = 0;
-  let impactTimer = 0;
-  const updateLevel = () => {
-    levelBar.style.height = `${level * 100}%`;
-    levelValue.textContent = `气势 ${Math.round(level * 100)}%`;
-    overlay.style.setProperty("--divine-intensity", level.toFixed(3));
-    overlay.style.setProperty("--level-glow", `${Math.round(14 + level * 30)}px`);
-    overlay.style.setProperty("--level-shadow-alpha", (0.2 + level * 0.5).toFixed(3));
-  };
-  const finish = (useHigh: boolean) => {
-    if (ended) return;
-    ended = true;
-    const probability = useHigh ? high : low;
-    const entry = dealSequence(game.pending!)[index]!;
-    const hit = game.applyDivineAssist(entry.side, entry.handIndex, probability);
-    divineRevealFeedback.set(index, { hit, target, probability });
-    tableScene?.setCard(index, dealSequence(game.pending!)[index]!.card);
-    overlay.classList.add("resolved", useHigh ? "high" : "low");
-    overlay.querySelector<HTMLElement>(".divine-heading")!.innerHTML = `<span>神助结算 · 目标押中${outcomeName(target)}</span><strong>${useHigh ? "高档概率" : "低档概率"}</strong>`;
-    const resultPanel = document.createElement("div");
-    resultPanel.className = "divine-result";
-    resultPanel.innerHTML = `<span>本次获得 · ${useHigh ? "高档神助" : "低档神助"}</span><b>${Math.round(probability * 100)}%</b><p>目标结果：押中${outcomeName(target)}</p><small>${callMeaning}。神助已经作用于最后一张暗牌，是否应验将在开牌时揭晓。</small><button class="primary" type="button">确认并继续开牌</button>`;
-    overlay.append(resultPanel);
-    resultPanel.querySelector("button")!.addEventListener("click", (event) => {
-      event.stopPropagation();
-      overlay.remove();
-      tablePlayerInteractionActive = false;
-      proceed();
+  overlay.querySelectorAll<HTMLButtonElement>("[data-divine-type]").forEach((button) => button.addEventListener("click", () => {
+    const type = button.dataset.divineType as DivineCardType;
+    overlay.remove();
+    runDivineMash(index, type, "short", (hit) => {
+      if (hit && game.pending!.result.outcome === target) {
+        divineRevealFeedback.set(index, { hit: true, target, probability: .72 });
+        tableScene?.setCard(index, dealSequence(game.pending!)[index]!.card);
+        tablePlayerInteractionActive = false;
+        tableScene?.quickSqueeze();
+        return;
+      }
+      chooseDivineCall(index, target);
     });
-  };
-  overlay.addEventListener("click", (event) => {
-    event.stopPropagation();
-    if (ended) return;
-    level = Math.min(1, level + 0.105);
-    updateLevel();
-    const power = 0.45 + level * 1.55;
-    const shake = 3 + level * 7;
-    overlay.style.setProperty("--impact-power", power.toFixed(3));
-    overlay.style.setProperty("--shake", `${shake.toFixed(1)}px`);
-    overlay.style.setProperty("--shake-neg", `${(-shake).toFixed(1)}px`);
-    overlay.style.setProperty("--flash-alpha", (0.22 + level * 0.28).toFixed(3));
-    overlay.classList.remove("impact");
-    void overlay.offsetWidth;
-    overlay.classList.add("impact");
-    window.clearTimeout(impactTimer);
-    impactTimer = window.setTimeout(() => overlay.classList.remove("impact"), 190);
-    if ("vibrate" in navigator) navigator.vibrate(Math.round(10 + level * 28));
-    const shout = document.createElement("span");
-    shout.textContent = callWord;
-    callCount += 1;
-    shout.style.setProperty("--x", `${event.clientX / window.innerWidth * 100}%`);
-    shout.style.setProperty("--y", `${event.clientY / window.innerHeight * 100}%`);
-    shout.style.setProperty("--r", `${callCount % 2 ? -8 : 8}deg`);
-    shout.style.setProperty("--power", power.toFixed(3));
-    shout.style.setProperty("--shout-size", `${Math.round(58 + 24 * power)}px`);
-    shout.style.setProperty("--stroke-width", `${(1 + 0.6 * power).toFixed(1)}px`);
-    shout.style.setProperty("--shadow-y", `${Math.round(5 * power)}px`);
-    shout.style.setProperty("--shout-glow", `${Math.round(16 * power)}px`);
-    shout.style.setProperty("--slam-scale", (2.2 + 0.25 * power).toFixed(3));
-    shout.style.setProperty("--impact-scale", (1.12 + 0.05 * power).toFixed(3));
-    shouts.append(shout);
-    window.setTimeout(() => shout.remove(), 480);
-    if (level >= 1) finish(true);
-  });
-  updateLevel();
-  const tick = (now: number) => {
-    if (ended) return;
-    const elapsed = now - startedAt;
-    level = Math.max(0, level - (now - lastAt) * 0.00019);
-    lastAt = now;
-    updateLevel();
-    timerBar.style.width = `${Math.max(0, 1 - elapsed / duration) * 100}%`;
-    timeValue.textContent = `剩余 ${Math.max(0, (duration - elapsed) / 1000).toFixed(1)} 秒`;
-    if (elapsed >= duration) finish(false);
-    else requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
+  }));
+}
+
+function chooseDivineCall(index: number, target: Outcome): void {
+  const overlay = document.createElement("div");
+  overlay.className = "divine-choice-overlay";
+  overlay.innerHTML = `<section><span>神助二阶段 · 定下点数</span><h2>吸，还是吹？</h2><p>再挤一次，把胜局锁住。</p><div><button data-divine-call="draw"><b>吸</b><small>向上补点</small></button><button data-divine-call="blow"><b>吹</b><small>压低点数</small></button></div></section>`;
+  document.body.append(overlay);
+  overlay.querySelectorAll<HTMLButtonElement>("[data-divine-call]").forEach((button) => button.addEventListener("click", () => {
+    overlay.remove();
+    runDivineMash(index, button.dataset.divineCall as "draw" | "blow", "long", (hit) => {
+      divineRevealFeedback.set(index, { hit, target, probability: .78 });
+      tableScene?.setCard(index, dealSequence(game.pending!)[index]!.card);
+      tablePlayerInteractionActive = false;
+      tableScene?.quickSqueeze();
+    });
+  }));
+}
+
+function runDivineMash(index: number, choice: DivineCardType | "draw" | "blow", edge: "short" | "long", done: (hit: boolean) => void): void {
+  const prompt = document.createElement("div");
+  prompt.className = "divine-mash-prompt";
+  prompt.innerHTML = `<strong>狂按！</strong><span>点击任何位置开始挤牌</span>`;
+  document.body.append(prompt);
+  prompt.addEventListener("click", () => {
+    prompt.remove();
+    const overlay = document.createElement("div");
+    overlay.className = "divine-mash-overlay";
+    const word = choice === "draw" ? "吸！" : choice === "blow" ? "吹！" : ({ face: "公！", "no-edge": "没边！", "two-edge": "两边！", "three-edge": "三边！", "four-edge": "四边！" } as const)[choice];
+    overlay.innerHTML = `<div class="divine-mash-head"><span>神助挤牌 · ${edge === "short" ? "短边" : "长边"}</span><strong>${word}</strong></div><div class="divine-mash-meter"><i></i></div><small>连点对抗回退</small><div class="divine-shouts"></div>`;
+    document.body.append(overlay);
+    const meter = overlay.querySelector<HTMLElement>(".divine-mash-meter i")!;
+    const shouts = overlay.querySelector<HTMLElement>(".divine-shouts")!;
+    const completionProgress = edge === "short" ? 0.3 : 1;
+    const clickAdvance = edge === "short" ? 0.024 : 0.105;
+    let progress = Math.min(0.16, completionProgress * 0.5);
+    let lastAt = performance.now();
+    let finished = false;
+    const resolve = () => {
+      if (finished) return;
+      finished = true;
+      const entry = dealSequence(game.pending!)[index]!;
+      const hit = choice === "draw" || choice === "blow"
+        ? game.applyDivineCall(entry.side, entry.handIndex, choice)
+        : game.applyDivineCardType(entry.side, entry.handIndex, choice);
+      overlay.remove();
+      if (edge === "short") tableScene?.resetDivineMash();
+      done(hit);
+    };
+    overlay.addEventListener("click", (event) => {
+      if (finished) return;
+      progress = Math.min(completionProgress, progress + clickAdvance);
+      tableScene?.divineMashStep(edge, progress);
+      const shout = document.createElement("span");
+      shout.textContent = word;
+      shout.style.setProperty("--x", `${event.clientX / innerWidth * 100}%`);
+      shout.style.setProperty("--y", `${event.clientY / innerHeight * 100}%`);
+      shouts.append(shout);
+      setTimeout(() => shout.remove(), 420);
+      overlay.classList.remove("impact"); void overlay.offsetWidth; overlay.classList.add("impact");
+      if ("vibrate" in navigator) navigator.vibrate(18);
+      if (progress >= completionProgress) resolve();
+    });
+    const tick = (now: number) => {
+      if (finished) return;
+      const speed = .00009 + progress * progress * .00042;
+      progress = Math.max(0, progress - (now - lastAt) * speed);
+      lastAt = now;
+      meter.style.width = `${progress / completionProgress * 100}%`;
+      tableScene?.divineMashStep(edge, progress);
+      if (progress <= 0) resolve();
+      else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, { once: true });
+}
+
+function showDivineSpecialEvent(): void {
+  if (!divineSpecialPending) return;
+  divineSpecialPending = false;
+  tablePlayerInteractionActive = true;
+  const overlay = document.createElement("div");
+  overlay.className = "divine-special-overlay";
+  const outcomes: Outcome[] = ["banker", "player", "tie"];
+  const forecast = outcomes[Math.floor(Math.random() * outcomes.length)]!;
+  const forecastChance = .6 + Math.random() * .2;
+  const allInThreshold = Math.floor(game.cash * (.6 + Math.random() * .3));
+  const allInChance = .6 + Math.random() * .3;
+  overlay.innerHTML = `<section><span>特殊事件</span><h2>我观察到了世界的变化！！</h2><p>连续三次神助并赢下本局，下一局可以改写一条规则。</p><div class="divine-special-options"><button data-special="forecast"><b>预言下次庄闲</b><small>我看见了趋势！是${outcomeName(forecast)}！！</small><i>下一局 ${Math.round(forecastChance * 100)}% 概率开${outcomeName(forecast)}</i></button><button data-special="lose"><b>预言下次结果</b><small>我看见了结果！会输！！</small><i>下一手必定失手</i></button><button data-special="all-in"><b>预言下次行为</b><small>我看见了机会！梭哈！！</small><i>下注 ≥ ${money(allInThreshold)}，胜率 ${Math.round(allInChance * 100)}%</i></button></div></section>`;
+  document.body.append(overlay);
+  overlay.querySelectorAll<HTMLButtonElement>("[data-special]").forEach((button) => button.addEventListener("click", () => {
+    const selected = button.dataset.special;
+    if (selected === "forecast") game.setNextRoundEffect({ kind: "forecast", outcome: forecast, chance: forecastChance });
+    if (selected === "lose") game.setNextRoundEffect({ kind: "lose" });
+    if (selected === "all-in") game.setNextRoundEffect({ kind: "all-in", threshold: allInThreshold, chance: allInChance });
+    overlay.remove();
+    tablePlayerInteractionActive = false;
+  }));
 }
 
 function advanceAfterCurrentCards(): void {
@@ -882,17 +987,22 @@ function revealNextAutomatically(): void {
 
 function revealFocusedCardByDealer(index: number): void {
   const assist = armDivineAssist(index);
+  if (assist) {
+    tableScene?.beginSqueeze(index, () => undefined, () => finishRevealWhileFocused(index));
+    startDivineGame(index, assist.target);
+    return;
+  }
   tableScene?.revealFocusedByDealer(index, () => {
-    if (assist) finishRevealWhileFocused(index);
-    else finishReveal(index);
-  }, assist ? {
-    keepFocus: true,
-    threshold: 0.42,
-    onThreshold: (resume) => startDivineGame(index, assist.target, assist.low, assist.high, resume),
-  } : {});
+    finishReveal(index);
+  });
 }
 
 function beginSqueeze(index: number, assist: ArmedDivineAssist | null): void {
+  if (assist) {
+    tableScene?.beginSqueeze(index, () => undefined, () => finishRevealWhileFocused(index));
+    startDivineGame(index, assist.target);
+    return;
+  }
   const tableStage = document.querySelector<HTMLElement>(".immersive-table-stage")!;
   tableStage.classList.add("squeeze-active");
   const overlay = document.createElement("div");
@@ -916,14 +1026,7 @@ function beginSqueeze(index: number, assist: ArmedDivineAssist | null): void {
     tableStage.classList.remove("squeeze-active");
     overlay.remove();
     finishRevealWhileFocused(index);
-  }, assist ? () => {
-    overlay.classList.add("divine-paused");
-    startDivineGame(index, assist.target, assist.low, assist.high, () => {
-      overlay.classList.remove("divine-paused");
-      overlay.classList.add("settling");
-      tableScene?.resumeSqueezeAndComplete();
-    });
-  } : null);
+  });
   overlay.querySelector<HTMLElement>("[data-squeeze-quick]")!.addEventListener("click", () => tableScene?.quickSqueeze());
 }
 
@@ -949,6 +1052,7 @@ function bind(): void {
       roadMarkFeedback = null;
       game.notice = "已清除本桌全部路书标记";
     }
+    if (action === "dismiss-road-creation-failure") roadCreationFailure = null;
     if (action === "cancel-bet") {
       const refund = game.cancelReservedBet();
       stagedBetSide = null;
@@ -956,6 +1060,7 @@ function bind(): void {
     }
     if (action === "watch") {
       resetBetDraft(true);
+      roadCreationFailure = null;
       game.play(tableId, null);
       inlineWatchActive = true;
       inlineWatchStep = 0;
@@ -965,9 +1070,10 @@ function bind(): void {
       view = "table";
     }
     if (action === "confirm-bet" && stagedBetSide && game.reservedBetAmount > 0) {
+      roadCreationFailure = null;
       game.play(tableId, { side: stagedBetSide, amount: game.reservedBetAmount });
       resetBetDraft(false);
-      revealedCardIndices.clear(); divineCheckedStages.clear(); divineRevealFeedback.clear(); tablePlayerInteractionActive = false; dealtCardCount = 4; dealStage = "animating"; view = "dealing";
+      revealedCardIndices.clear(); divineCheckedStages.clear(); divineRevealFeedback.clear(); divineActivationsThisRound = 0; divineSpecialPending = false; tablePlayerInteractionActive = false; dealtCardCount = 4; dealStage = "animating"; view = "dealing";
     }
     if (action === "reveal-self") {
       const pending = game.pending!;
@@ -1024,54 +1130,119 @@ function bind(): void {
     render();
   }));
 
-  app.querySelectorAll<HTMLElement>("[data-road-book]").forEach((element) => element.addEventListener("click", (event) => {
+  app.querySelectorAll<HTMLElement>("[data-road-create-book]").forEach((element) => element.addEventListener("click", (event) => {
     event.stopPropagation();
-    if (view !== "table") return;
-    const roadBook = element.dataset.roadBook as RoadBook;
-    if (roadBook === "bead") {
-      const table = game.table(tableId);
-      const patterns = game.markCurrentBeadRoad(tableId);
-      const count = patterns.length;
-      const markedCount = markedRoadBookCount(tableId);
-      game.notice = count ? `珠盘路标记完成 · 共标记 ${markedCount} 路，成立 ${game.markedRoadPatterns(tableId).length} 型` : "珠盘路未标记 · 下一格所在行向左未形成有效路数";
-      const nextRow = (table.historyOffset + table.history.length) % 6 + 1;
-      const rowHistory: Outcome[] = [];
-      for (let index = table.history.length - 6; index >= 0 && rowHistory.length < 6; index -= 6) rowHistory.push(table.history[index]!.outcome);
-      const rowLabel = rowHistory.length ? rowHistory.map(outcomeName).join("、") : "尚无记录";
+    if (view !== "table" || game.pending) return;
+    const roadBook = element.dataset.roadCreateBook as RoadBook;
+    const table = game.table(tableId);
+    const sequence = game.roadCreationSequence(tableId);
+    const creationIndex = Number(element.dataset.creationIndex);
+    if (!Number.isInteger(creationIndex) || creationIndex < 0 || creationIndex > sequence.length) return;
+    const prefix = sequence.slice(0, creationIndex);
+    const history = prefix.reduce((projected, side) => appendHypotheticalRound(table, projected, side), table.history);
+    const currentSide = sequence[creationIndex] ?? null;
+    const cancelFromCreation = () => {
+      const removedCount = sequence.length - creationIndex;
+      game.updateRoadCreation(tableId, creationIndex, null);
       roadMarkFeedback = {
-        message: "珠盘路已标记",
-        debug: count
-          ? `${patterns[0]!.name}有效，预测${outcomeName(patterns[0]!.prediction)}`
-          : `当前无有效路数；下一格第 ${nextRow} 行，向左为 ${rowLabel}`,
+        message: creationIndex === 0 ? "已取消全部创造路数" : `已撤销第 ${creationIndex + 1} 局及后续预测`,
+        debug: `共撤销 ${removedCount} 局虚影`,
+      };
+      render();
+    };
+    if (roadBook !== "bead") {
+      if (currentSide) {
+        cancelFromCreation();
+        return;
+      }
+      const selectedSide = element.dataset.roadSide;
+      if (selectedSide !== "banker" && selectedSide !== "player") return;
+      const selectedColor = element.dataset.roadColor === "blue" ? "蓝" : "红";
+      game.updateRoadCreation(tableId, creationIndex, selectedSide);
+      roadMarkFeedback = {
+        message: `继续创造 · 第 ${creationIndex + 1} 局预想${outcomeName(selectedSide)}`,
+        debug: `${selectedColor}色虚影已同步到全部路书，再点一次可撤销`,
       };
       render();
       return;
     }
-    const visibleFrom = Number(element.dataset.visibleFrom ?? 0);
-    const columns = Number(element.dataset.columns ?? 1);
+    const currentCell = currentSide ? roadPreviewCell(table, roadBook, history, currentSide, creationIndex) : null;
+    const desiredColor: DerivedRoadColor | null = !currentSide ? "red" : currentCell?.color === "red" ? "blue" : null;
+    if (!desiredColor) {
+      cancelFromCreation();
+      return;
+    }
+    const clickedRow = Number(element.dataset.row);
+    const clickedColumn = Number(element.dataset.column);
+    const candidates = (["banker", "player"] as const)
+      .map((side) => roadPreviewCell(table, roadBook, history, side, creationIndex))
+      .filter((cell): cell is RoadPreviewCell => cell !== null && cell.color === desiredColor);
+    const selected = candidates.find((cell) => cell.row === clickedRow && cell.column === clickedColumn) ?? candidates[0];
+    if (!selected) {
+      roadMarkFeedback = {
+        message: `当前无法画出${desiredColor === "red" ? "红" : "蓝"}色下一路`,
+        debug: "庄闲问路没有可唯一同步的对应结果",
+      };
+      render();
+      return;
+    }
+    const removedLaterCount = Math.max(0, sequence.length - creationIndex - 1);
+    game.updateRoadCreation(tableId, creationIndex, selected.side);
+    roadMarkFeedback = {
+      message: creationIndex === sequence.length
+        ? `继续创造 · 第 ${creationIndex + 1} 局预想${outcomeName(selected.side)}`
+        : `已修改第 ${creationIndex + 1} 局 · 预想${outcomeName(selected.side)}`,
+      debug: `${desiredColor === "red" ? "红" : "蓝"}色虚影已同步到全部路书${removedLaterCount ? `，后续 ${removedLaterCount} 局已撤销` : ""}`,
+    };
+    render();
+  }));
+
+  app.querySelectorAll<HTMLElement>("[data-road-mark-title]").forEach((element) => element.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (view !== "table" || game.pending) return;
+    const roadBook = element.dataset.roadMarkTitle as RoadBook;
+    const history = game.roadAnalysisHistory(tableId);
+    if (roadBook === "bead") {
+      const patterns = game.markCurrentBeadRoad(tableId);
+      const currentPattern = patterns[0] ?? null;
+      const markedPatterns = game.markedRoadPatterns(tableId);
+      game.notice = currentPattern ? `标记完成 · 共标记 ${markedRoadBookCount(tableId)} 路，成立 ${markedPatterns.length} 型` : "珠盘路已完整标记 · 当前未形成有效路数";
+      roadMarkFeedback = {
+        message: "珠盘路已完整标记",
+        debug: currentPattern ? `${currentPattern.name}有效，预测${outcomeName(currentPattern.prediction)}` : "整张路书已标记，当前无有效路数",
+      };
+      render();
+      return;
+    }
+    const roadWindow = element.parentElement?.querySelector<HTMLElement>("[data-road-window]");
+    if (!roadWindow) return;
+    const visibleFrom = Number(roadWindow.dataset.visibleFrom ?? 0);
+    const columns = Number(roadWindow.dataset.columns ?? 1);
     const bounds = element.getBoundingClientRect();
     const localColumn = Math.max(0, Math.min(columns - 1, Math.floor(((event.clientX - bounds.left) / bounds.width) * columns)));
     const startColumn = visibleFrom + localColumn;
-    const table = game.table(tableId);
-    const derived = makeDerivedRoads(table.history);
+    const derived = makeDerivedRoads(history);
     const roadCells = roadBook === "big"
-      ? makeBigRoad(table.history)
+      ? makeBigRoad(history)
       : roadBook === "big-eye"
         ? derived.bigEye
         : roadBook === "small"
           ? derived.small
           : derived.cockroach;
-    const startRound = roadCells.filter((cell) => cell.column >= startColumn).sort((a, b) => a.roundIndex - b.roundIndex)[0]?.roundIndex ?? table.history.length;
+    const cellsWithRounds = roadCells as Array<{ column: number; roundIndex: number }>;
+    const startRound = cellsWithRounds
+      .filter((cell) => cell.column >= startColumn)
+      .sort((a, b) => a.roundIndex - b.roundIndex)[0]?.roundIndex ?? history.length;
     game.markRoad(tableId, roadBook, startColumn, startRound);
     const markedPatterns = game.markedRoadPatterns(tableId);
     const currentPattern = markedPatterns.find((pattern) => pattern.source === roadBook);
-    const exactStart = confidenceRoadStartColumn(table.history, roadBook);
+    const exactStart = confidenceRoadStartColumn(history, roadBook);
     game.notice = currentPattern ? `标记完成 · 共标记 ${markedRoadBookCount(tableId)} 路，成立 ${markedPatterns.length} 型` : "标记完成 · 当前区间未形成有效路数";
     roadMarkFeedback = {
-      message: "路书区间已标记",
+      message: `${roadBook === "big" ? "大路" : roadBook === "big-eye" ? "大眼仔路" : roadBook === "small" ? "小路" : "曱甴路"}标题栏已标记`,
       debug: currentPattern
         ? `${currentPattern.name}有效，预测${outcomeName(currentPattern.prediction)}`
-        : exactStart === null ? "当前无有效路数" : `未命中有效路数起始列；应标记第 ${exactStart + 1} 列`,
+        : exactStart === null ? `第 ${startColumn + 1} 列当前无有效路数` : `未命中有效路数起始列；应标记第 ${exactStart + 1} 列`,
     };
     render();
   }));

@@ -191,7 +191,7 @@ export function dealRound(rng: Rng, id: number): RoundResult {
   return { id, outcome, bankerCards, playerCards, bankerPoints, playerPoints, natural };
 }
 
-function legalRoundCardCandidates(result: RoundResult, side: Side, handIndex: number): RoundResult[] {
+export function legalRoundCardCandidates(result: RoundResult, side: Side, handIndex: number): RoundResult[] {
   const originalHand = side === "player" ? result.playerCards : result.bankerCards;
   const original = originalHand[handIndex];
   if (!original) return [];
@@ -606,25 +606,39 @@ function placeDerivedColors(entries: DerivedColorEntry[]): DerivedRoadCell[] {
 
 function derivedColors(bigRoad: RoadCell[], offset: number): DerivedColorEntry[] {
   const colors: DerivedColorEntry[] = [];
-  const seen = new Set<string>();
-  const height = new Map<number, number>();
+  const logicalColumns: RoadCell[][] = [];
 
+  // 下三路比较的是大路的逻辑列（每段连续庄或闲），不是牌路在
+  // 六行边界转弯后的绘制列。按结果重新分段可避免长龙横向延伸时误判。
   for (const cell of bigRoad) {
-    seen.add(`${cell.column}:${cell.row}`);
-    height.set(cell.column, Math.max(height.get(cell.column) ?? 0, cell.row + 1));
-    if (cell.column < offset || (cell.column === offset && cell.row === 0)) continue;
+    const current = logicalColumns.at(-1);
+    if (!current || current[0]!.outcome !== cell.outcome) logicalColumns.push([cell]);
+    else current.push(cell);
+  }
 
-    if (cell.row === 0) {
-      const nearHeight = height.get(cell.column - 1) ?? 0;
-      const farHeight = height.get(cell.column - 1 - offset) ?? 0;
-      colors.push({ color: nearHeight === farHeight ? "red" : "blue", roundIndex: cell.roundIndex });
-      continue;
+  for (const [columnIndex, column] of logicalColumns.entries()) {
+    for (const [rowIndex, cell] of column.entries()) {
+      if (rowIndex === 0) {
+        const nearColumn = logicalColumns[columnIndex - 1];
+        const farColumn = logicalColumns[columnIndex - 1 - offset];
+        if (!nearColumn || !farColumn) continue;
+        colors.push({
+          color: nearColumn.length === farColumn.length ? "red" : "blue",
+          roundIndex: cell.roundIndex,
+        });
+        continue;
+      }
+
+      const comparisonColumn = logicalColumns[columnIndex - offset];
+      if (!comparisonColumn) continue;
+      const row = rowIndex + 1;
+      // 齐整为红；当前列恰好多出一格（“一厅两房”）为蓝；
+      // 再继续延长已经形成新的规律尾部，因此恢复为红。
+      colors.push({
+        color: row === comparisonColumn.length + 1 ? "blue" : "red",
+        roundIndex: cell.roundIndex,
+      });
     }
-
-    const comparisonColumn = cell.column - offset;
-    const sameRowExists = seen.has(`${comparisonColumn}:${cell.row}`);
-    const previousRowExists = seen.has(`${comparisonColumn}:${cell.row - 1}`);
-    colors.push({ color: sameRowExists || !previousRowExists ? "red" : "blue", roundIndex: cell.roundIndex });
   }
   return colors;
 }
