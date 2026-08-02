@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SQUEEZE_COMPLETE_PROGRESS, snapSqueezeDirection, tableCardPositions } from "./table-scene";
+import { DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, SQUEEZE_COMPLETE_PROGRESS, divineMashRetreatRatioPerMs, snapSqueezeDirection, tableCardPositions } from "./table-scene";
 
 describe("squeeze direction snapping", () => {
   it("snaps the player-facing long edge, lower-left corner and short edge", () => {
@@ -22,6 +22,14 @@ describe("squeeze direction snapping", () => {
 
   it("uses a 70% completion threshold", () => {
     expect(SQUEEZE_COMPLETE_PROGRESS).toBe(0.7);
+  });
+
+  it("uses the same normalized mash resistance in both divine stages", () => {
+    expect(DIVINE_MASH_INITIAL_RATIO).toBe(0.28);
+    expect(DIVINE_MASH_CLICK_RATIO).toBe(0.09);
+    expect(0.3 * DIVINE_MASH_CLICK_RATIO / 0.3).toBeCloseTo(DIVINE_MASH_CLICK_RATIO);
+    expect(1 * DIVINE_MASH_CLICK_RATIO / 1).toBeCloseTo(DIVINE_MASH_CLICK_RATIO);
+    expect(divineMashRetreatRatioPerMs(0.8)).toBeGreaterThan(divineMashRetreatRatioPerMs(0.3));
   });
 
   it("keeps finger removal perpendicular to reveal progress in every mode", () => {

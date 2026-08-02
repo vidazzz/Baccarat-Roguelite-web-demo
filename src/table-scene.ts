@@ -36,6 +36,13 @@ export interface SqueezeDirectionInfo {
 }
 
 export const SQUEEZE_COMPLETE_PROGRESS = 0.7;
+export const DIVINE_MASH_INITIAL_RATIO = 0.28;
+export const DIVINE_MASH_CLICK_RATIO = 0.09;
+
+export function divineMashRetreatRatioPerMs(progressRatio: number): number {
+  const ratio = THREE.MathUtils.clamp(progressRatio, 0, 1);
+  return 0.0001 + ratio * ratio * 0.00032;
+}
 
 export function snapSqueezeDirection(x: number, y: number, side: Side): SqueezeDirectionInfo | null {
   const leftSign = side === "player" ? -1 : 1;
@@ -178,6 +185,24 @@ export class TableScene {
       lookAt: new THREE.Vector3(entry.target.x, 0, entry.target.z),
       done: onDone,
     };
+  }
+
+  activeCardScreenBounds(): { left: number; top: number; right: number; bottom: number } | null {
+    const entry = this.squeezeIndex === null ? null : this.cards[this.squeezeIndex];
+    if (!entry) return null;
+    const bounds = this.renderer.domElement.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return null;
+    entry.group.updateWorldMatrix(true, false);
+    this.camera.updateMatrixWorld();
+    const points = [
+      new THREE.Vector3(-0.575, -0.85, 0),
+      new THREE.Vector3(0.575, -0.85, 0),
+      new THREE.Vector3(0.575, 0.85, 0),
+      new THREE.Vector3(-0.575, 0.85, 0),
+    ].map((point) => entry.group.localToWorld(point).project(this.camera));
+    const xs = points.map((point) => bounds.left + (point.x + 1) * bounds.width / 2);
+    const ys = points.map((point) => bounds.top + (1 - point.y) * bounds.height / 2);
+    return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
   }
 
   showRevealed(index: number): void {

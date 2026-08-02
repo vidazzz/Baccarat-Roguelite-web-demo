@@ -6,7 +6,7 @@ import restaurantAsset from "./restaurant.jpg";
 import { cardFaceAsset } from "./card-assets";
 import { cardLabel, cardValue, confidenceRoadStartColumn, forecastBaccaratReveal, makeBeadPlate, makeBigRoad, makeDerivedRoads, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type DerivedRoadColor, type Outcome, type RoadBook, type RoundResult, type Side } from "./domain";
 import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps, skillDefinitions, type Casino, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
-import { TableScene } from "./table-scene";
+import { DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, divineMashRetreatRatioPerMs, TableScene } from "./table-scene";
 
 type View = "map" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
 type Activity = "restaurant" | "casino" | "home";
@@ -875,6 +875,43 @@ function chooseDivineCall(index: number, target: Outcome): void {
   }));
 }
 
+interface DivineShoutRegion {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function randomDivineShoutPosition(fontSize: number): { x: number; y: number } {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const horizontalMargin = Math.max(width * 0.1, Math.min(fontSize * 1.35, width * 0.3));
+  const verticalMargin = Math.max(height * 0.18, fontSize * 0.7);
+  const safe = { left: horizontalMargin, top: verticalMargin, right: width - horizontalMargin, bottom: height - verticalMargin };
+  const card = tableScene?.activeCardScreenBounds() ?? { left: width * 0.38, top: height * 0.25, right: width * 0.62, bottom: height * 0.75 };
+  const gapX = fontSize * 1.45;
+  const gapY = fontSize * 0.75;
+  const candidates: DivineShoutRegion[] = [
+    { ...safe, right: Math.min(safe.right, card.left - gapX) },
+    { ...safe, left: Math.max(safe.left, card.right + gapX) },
+    { ...safe, bottom: Math.min(safe.bottom, card.top - gapY) },
+    { ...safe, top: Math.max(safe.top, card.bottom + gapY) },
+  ].filter((region) => region.right - region.left >= 12 && region.bottom - region.top >= 12);
+  const totalArea = candidates.reduce((sum, region) => sum + (region.right - region.left) * (region.bottom - region.top), 0);
+  if (!totalArea) {
+    return { x: width * (Math.random() < 0.5 ? 0.25 : 0.75), y: height * (0.34 + Math.random() * 0.4) };
+  }
+  let roll = Math.random() * totalArea;
+  const region = candidates.find((candidate) => {
+    roll -= (candidate.right - candidate.left) * (candidate.bottom - candidate.top);
+    return roll <= 0;
+  }) ?? candidates.at(-1)!;
+  return {
+    x: region.left + Math.random() * (region.right - region.left),
+    y: region.top + Math.random() * (region.bottom - region.top),
+  };
+}
+
 function runDivineMash(index: number, choice: DivineCardType | "draw" | "blow", edge: "short" | "long", done: (hit: boolean) => void): void {
   const prompt = document.createElement("div");
   prompt.className = "divine-mash-prompt";
@@ -885,13 +922,12 @@ function runDivineMash(index: number, choice: DivineCardType | "draw" | "blow", 
     const overlay = document.createElement("div");
     overlay.className = "divine-mash-overlay";
     const word = choice === "draw" ? "吸！" : choice === "blow" ? "吹！" : ({ face: "公！", "no-edge": "没边！", "two-edge": "两边！", "three-edge": "三边！", "four-edge": "四边！" } as const)[choice];
-    overlay.innerHTML = `<div class="divine-mash-head"><span>神助挤牌 · ${edge === "short" ? "短边" : "长边"}</span><strong>${word}</strong></div><div class="divine-mash-meter"><i></i></div><small>连点对抗回退</small><div class="divine-shouts"></div>`;
+    overlay.innerHTML = `<div class="divine-mash-head"><span>神助挤牌 · ${edge === "short" ? "短边" : "长边"}</span><strong>${word}</strong></div><small>保持连点，别让牌退回去</small><div class="divine-shouts"></div>`;
     document.body.append(overlay);
-    const meter = overlay.querySelector<HTMLElement>(".divine-mash-meter i")!;
     const shouts = overlay.querySelector<HTMLElement>(".divine-shouts")!;
     const completionProgress = edge === "short" ? 0.3 : 1;
-    const clickAdvance = edge === "short" ? 0.024 : 0.105;
-    let progress = Math.min(0.16, completionProgress * 0.5);
+    const clickAdvance = completionProgress * DIVINE_MASH_CLICK_RATIO;
+    let progress = completionProgress * DIVINE_MASH_INITIAL_RATIO;
     let lastAt = performance.now();
     let finished = false;
     const resolve = () => {
@@ -905,26 +941,39 @@ function runDivineMash(index: number, choice: DivineCardType | "draw" | "blow", 
       if (edge === "short") tableScene?.resetDivineMash();
       done(hit);
     };
-    overlay.addEventListener("click", (event) => {
+    overlay.addEventListener("click", () => {
       if (finished) return;
       progress = Math.min(completionProgress, progress + clickAdvance);
       tableScene?.divineMashStep(edge, progress);
+      const progressRatio = progress / completionProgress;
+      const randomScale = 0.78 + Math.random() * 0.4;
+      const maximumSize = Math.min(window.innerWidth * 0.24, window.innerHeight * 0.15);
+      const fontSize = Math.max(34, Math.min((34 + progressRatio * 82) * randomScale, maximumSize));
+      const position = randomDivineShoutPosition(fontSize);
       const shout = document.createElement("span");
       shout.textContent = word;
-      shout.style.setProperty("--x", `${event.clientX / innerWidth * 100}%`);
-      shout.style.setProperty("--y", `${event.clientY / innerHeight * 100}%`);
+      shout.style.setProperty("--x", `${position.x}px`);
+      shout.style.setProperty("--y", `${position.y}px`);
+      shout.style.setProperty("--shout-size", `${fontSize}px`);
+      shout.style.setProperty("--stroke-width", `${1.5 + progressRatio * 2}px`);
+      shout.style.setProperty("--shout-glow", `${18 + progressRatio * 32}px`);
+      shout.style.setProperty("--slam-scale", `${2.1 + progressRatio * 1.2}`);
+      shout.style.setProperty("--impact-scale", `${1.08 + progressRatio * 0.22}`);
+      shout.style.setProperty("--r", `${-14 + Math.random() * 28}deg`);
       shouts.append(shout);
       setTimeout(() => shout.remove(), 420);
+      const shake = 3 + progressRatio * 8;
+      overlay.style.setProperty("--shake", `${shake}px`);
+      overlay.style.setProperty("--shake-neg", `${-shake}px`);
       overlay.classList.remove("impact"); void overlay.offsetWidth; overlay.classList.add("impact");
       if ("vibrate" in navigator) navigator.vibrate(18);
       if (progress >= completionProgress) resolve();
     });
     const tick = (now: number) => {
       if (finished) return;
-      const speed = .00009 + progress * progress * .00042;
+      const speed = completionProgress * divineMashRetreatRatioPerMs(progress / completionProgress);
       progress = Math.max(0, progress - (now - lastAt) * speed);
       lastAt = now;
-      meter.style.width = `${progress / completionProgress * 100}%`;
       tableScene?.divineMashStep(edge, progress);
       if (progress <= 0) resolve();
       else requestAnimationFrame(tick);
