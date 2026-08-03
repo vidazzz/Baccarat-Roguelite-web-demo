@@ -7,7 +7,7 @@ import mapDaylightAsset from "./map_daylight.jpg";
 import restaurantAsset from "./restaurant.jpg";
 import { cardFaceAsset } from "./card-assets";
 import { cardLabel, cardValue, confidenceRoadStartColumn, forecastBaccaratReveal, makeBeadPlate, makeBigRoad, makeDerivedRoads, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type DerivedRoadColor, type Outcome, type RoadBook, type RoundResult, type Side } from "./domain";
-import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps, skillDefinitions, type Casino, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
+import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, inlineWatchSteps, skillDefinitions, type Casino, type DebugGameplayConfig, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
 import { composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, divineMashRetreatRatioPerMs, TableScene, type TableChip } from "./table-scene";
 
 type View = "map" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
@@ -368,8 +368,10 @@ function skillsView(): string {
 function restaurantView(): string {
   const info = game.restaurantInfo();
   const max = info.nextCost === null;
-  const progress = game.restaurant.cycleElapsedWorldMinutes / RESTAURANT_CYCLE_WORLD_MINUTES;
-  const worldMinutesRemaining = Math.ceil(RESTAURANT_CYCLE_WORLD_MINUTES - game.restaurant.cycleElapsedWorldMinutes);
+  const cycleWorldMinutes = game.debugGameplayConfig.restaurantCycleWorldMinutes;
+  const progress = game.restaurant.cycleElapsedWorldMinutes / cycleWorldMinutes;
+  const worldMinutesRemaining = Math.ceil(cycleWorldMinutes - game.restaurant.cycleElapsedWorldMinutes);
+  const cycleLabel = cycleWorldMinutes === 60 ? "游戏小时" : `${cycleWorldMinutes} 游戏分钟`;
   return shell(`
     <section class="restaurant-scene-page">
       <div class="restaurant-scene">
@@ -377,7 +379,7 @@ function restaurantView(): string {
         <div class="restaurant-scene-shade" aria-hidden="true"></div>
         <div class="restaurant-scene-header"><div><p class="eyebrow">稳定收入 · 外港小馆</p><h1>${game.restaurant.pawned ? "已典当" : game.restaurant.open ? `${game.restaurant.level} 级经营中` : "今日已打烊"}</h1></div></div>
         <section class="restaurant-control-panel ${game.restaurant.pawned ? "is-pawned" : ""} ${game.restaurant.open ? "is-open" : "is-closed"}">
-          <header><div><span>餐厅经营 · 08:00 - 20:00</span><h2>${game.restaurant.pawned ? "停止营业" : game.restaurant.open ? "营业中" : "已打烊"}</h2></div><strong>${game.restaurant.pawned || !game.restaurant.open ? "—" : money(info.income)}<small>${game.restaurant.pawned ? "无收益" : game.restaurant.open ? "/ 游戏小时" : "等待继续营业"}</small></strong></header>
+          <header><div><span>餐厅经营 · 08:00 - 20:00</span><h2>${game.restaurant.pawned ? "停止营业" : game.restaurant.open ? "营业中" : "已打烊"}</h2></div><strong>${game.restaurant.pawned || !game.restaurant.open ? "—" : money(info.income)}<small>${game.restaurant.pawned ? "无收益" : game.restaurant.open ? `/ ${cycleLabel}` : "等待继续营业"}</small></strong></header>
           <div class="restaurant-scene-stats"><div><span>当前等级</span><b>Lv.${game.restaurant.level}</b></div><div><span>周期收益</span><b>${game.restaurant.pawned || !game.restaurant.open ? "停止" : money(info.income)}</b></div><div><span>典当估值</span><b>${game.restaurant.pawned ? "已领取" : money(info.pawn)}</b></div></div>
           <div class="restaurant-progress ${game.restaurant.open ? "" : "is-stopped"}" data-restaurant-progress><div><span>下一次结算</span><em>${game.restaurant.pawned ? "已停止" : game.restaurant.open ? `${worldMinutesRemaining} 游戏分钟后` : "餐厅已打烊"}</em></div><i><b style="width:${game.restaurant.open ? progress * 100 : 0}%"></b></i></div>
           <div class="restaurant-actions">${!game.restaurant.open && !game.restaurant.pawned ? `<button class="primary" data-action="continue-restaurant">继续营业 · 至下次打烊</button>` : ""}<button class="primary" data-action="upgrade" ${game.restaurant.pawned || max || game.cash < (info.nextCost ?? 0) ? "disabled" : ""}>${max ? "已达最高等级" : `升级 · ${money(info.nextCost!)}`}</button><button class="danger" data-action="pawn" ${game.restaurant.pawned ? "disabled" : ""}>典当 · 获得 ${money(info.pawn)}</button></div>
@@ -760,7 +762,15 @@ function renderDebugMenu(): void {
   overlay.className = "debug-overlay";
   const confidencePercent = Math.round(game.confidence * 100);
   const basePercent = Math.round(game.debugBaseConfidence * 100);
-  overlay.innerHTML = `<section class="debug-menu" role="dialog" aria-modal="true" aria-label="测试调试菜单"><header><div><span>TEST TOOLS</span><h2>测试调试</h2></div><button type="button" data-debug-close aria-label="关闭调试菜单">×</button></header><div class="debug-row debug-confidence-control"><div><strong>基础信心</strong><small>滑块只修改信心公式的基础值；路数、下注和连胜仍会照常结算。</small></div><output data-debug-base-confidence-value>${basePercent}%</output><div class="debug-slider-row"><input type="range" min="0" max="100" value="${basePercent}" style="--debug-confidence:${basePercent}%" data-debug-base-confidence aria-label="调整基础信心"><div><span>0%</span><span>50%</span><span>100%</span></div></div><button class="debug-reset" type="button" data-debug-confidence-reset ${basePercent === 0 ? "disabled" : ""}>恢复默认 0%</button><label class="debug-switch"><input type="checkbox" data-debug-confidence-lock ${game.debugConfidenceForced ? "checked" : ""}><i></i><span>锁定 100% 信心</span></label></div><footer><span>${game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心"}</span><strong data-debug-confidence-value>${confidencePercent}%</strong><small>按 ESC 关闭</small></footer></section>`;
+  const config = game.debugGameplayConfig;
+  const debugNumberField = (label: string, description: string, key: keyof DebugGameplayConfig, value: number, min: number, step: number, unit: string, scale = 1): string => `
+    <label class="debug-number-field">
+      <span><strong>${label}</strong><small>${description}</small></span>
+      <span class="debug-number-input"><input type="number" min="${min}" step="${step}" value="${value}" data-debug-setting="${key}" data-debug-scale="${scale}"><i>${unit}</i></span>
+    </label>`;
+  const cashControl = `<section class="debug-cash-control"><div><span>当前资金</span><strong>${money(game.cash)}</strong></div><div><button type="button" data-debug-cash-adjust="-100000" ${game.cash <= 0 ? "disabled" : ""}>扣钱 -100,000</button><button type="button" data-debug-cash-adjust="100000">加钱 +100,000</button></div></section>`;
+  overlay.innerHTML = `<section class="debug-menu" role="dialog" aria-modal="true" aria-label="测试调试菜单"><header><div><span>TEST TOOLS</span><h2>测试调试</h2></div><button type="button" data-debug-close aria-label="关闭调试菜单">×</button></header><div class="debug-menu-body"><div class="debug-row debug-confidence-control"><div><strong>基础信心</strong><small>路数、下注和连胜仍会参与最终结算。</small></div><output data-debug-base-confidence-value>${basePercent}%</output><div class="debug-slider-row"><input type="range" min="0" max="100" value="${basePercent}" style="--debug-confidence:${basePercent}%" data-debug-base-confidence aria-label="调整基础信心"><div><span>0%</span><span>50%</span><span>100%</span></div></div><label class="debug-switch"><input type="checkbox" data-debug-confidence-lock ${game.debugConfidenceForced ? "checked" : ""}><i></i><span>锁定 100% 信心</span></label></div><section class="debug-settings"><h3>经营与时间</h3>${debugNumberField("餐厅周期收益", "当前等级每次结算实际到账", "restaurantIncomePerCycle", config.restaurantIncomePerCycle, 0, 100, "元")}${debugNumberField("餐厅结算周期", "按游戏世界时间累计", "restaurantCycleWorldMinutes", config.restaurantCycleWorldMinutes, 1, 1, "游戏分钟")}${debugNumberField("赌场外时间流速", "每 1 个现实秒推进的游戏时间", "worldMinutesPerRealSecondOutsideCasino", config.worldMinutesPerRealSecondOutsideCasino, 0, 1, "游戏分钟/秒")}${debugNumberField("赌场内时间流速", "每 1 个现实秒推进的游戏时间", "worldMinutesPerRealSecondInsideCasino", config.worldMinutesPerRealSecondInsideCasino, 0, 0.1, "游戏分钟/秒")}</section><section class="debug-settings"><h3>睡眠与疲劳</h3>${debugNumberField("每日睡眠债务", "每天 00:00 新增", "sleepDebtPerMidnightWorldMinutes", config.sleepDebtPerMidnightWorldMinutes / 60, 0, 0.5, "小时", 60)}${debugNumberField("疲劳触发阈值", "累计达到该数值后进入睡眠不足", "sleepDebtThresholdWorldMinutes", config.sleepDebtThresholdWorldMinutes / 60, 1 / 60, 0.5, "小时", 60)}</section></div><footer><div><span>${game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心"}</span><strong data-debug-confidence-value>${confidencePercent}%</strong></div><button class="debug-reset-all" type="button" data-debug-reset-all>恢复全部默认</button><small>按 ESC 关闭</small></footer></section>`;
+  overlay.querySelector<HTMLElement>(".debug-menu-body")!.insertAdjacentHTML("afterbegin", cashControl);
   document.body.append(overlay);
   overlay.querySelector<HTMLElement>("[data-debug-close]")!.addEventListener("click", () => {
     debugMenuOpen = false;
@@ -769,15 +779,40 @@ function renderDebugMenu(): void {
   overlay.querySelector<HTMLInputElement>("[data-debug-base-confidence]")!.addEventListener("input", (event) => {
     game.setDebugBaseConfidence(Number((event.currentTarget as HTMLInputElement).value) / 100);
     syncConfidenceDisplay();
-    (overlay.querySelector("[data-debug-confidence-reset]") as HTMLButtonElement).disabled = false;
   });
   overlay.querySelector<HTMLInputElement>("[data-debug-confidence-lock]")!.addEventListener("change", (event) => {
     game.setDebugConfidenceForced((event.currentTarget as HTMLInputElement).checked);
     syncConfidenceDisplay();
     overlay.querySelector("footer span")!.textContent = game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心";
   });
-  overlay.querySelector<HTMLElement>("[data-debug-confidence-reset]")!.addEventListener("click", () => {
-    game.setDebugBaseConfidence(0);
+  overlay.querySelectorAll<HTMLButtonElement>("[data-debug-cash-adjust]").forEach((button) => {
+    button.addEventListener("click", () => {
+      game.adjustDebugCash(Number(button.dataset.debugCashAdjust));
+      if (view !== "dealing") render();
+      else {
+        const wallet = document.querySelector<HTMLElement>(".wallet strong");
+        if (wallet) wallet.textContent = money(game.cash);
+      }
+      renderDebugMenu();
+    });
+  });
+  overlay.querySelectorAll<HTMLInputElement>("[data-debug-setting]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const value = Number(input.value);
+      if (!Number.isFinite(value)) {
+        renderDebugMenu();
+        return;
+      }
+      const key = input.dataset.debugSetting as keyof DebugGameplayConfig;
+      const scale = Number(input.dataset.debugScale ?? 1);
+      game.setDebugGameplayConfig({ [key]: value * scale });
+      if (view === "restaurant" || view === "map") render();
+      renderDebugMenu();
+    });
+  });
+  overlay.querySelector<HTMLElement>("[data-debug-reset-all]")!.addEventListener("click", () => {
+    game.resetDebugOptions();
+    if (view === "restaurant" || view === "map") render();
     renderDebugMenu();
     syncConfidenceDisplay();
   });
@@ -1603,9 +1638,10 @@ window.setInterval(() => {
   if (sleepStatus) sleepStatus.hidden = !game.isSleepDeprived();
 
   const restaurantClock = document.querySelector<HTMLElement>("[data-restaurant-clock]");
-  const worldMinutesRemaining = Math.ceil(RESTAURANT_CYCLE_WORLD_MINUTES - game.restaurant.cycleElapsedWorldMinutes);
+  const restaurantCycleWorldMinutes = game.debugGameplayConfig.restaurantCycleWorldMinutes;
+  const worldMinutesRemaining = Math.ceil(restaurantCycleWorldMinutes - game.restaurant.cycleElapsedWorldMinutes);
   if (restaurantClock) {
-    restaurantClock.style.setProperty("--progress", String(game.restaurant.cycleElapsedWorldMinutes / RESTAURANT_CYCLE_WORLD_MINUTES));
+    restaurantClock.style.setProperty("--progress", String(game.restaurant.cycleElapsedWorldMinutes / restaurantCycleWorldMinutes));
     const value = restaurantClock.querySelector("strong");
     if (value) value.textContent = `${worldMinutesRemaining}分`;
   }
@@ -1613,7 +1649,7 @@ window.setInterval(() => {
   if (restaurantProgress) {
     const bar = restaurantProgress.querySelector<HTMLElement>("i b");
     const label = restaurantProgress.querySelector<HTMLElement>("em");
-    if (bar) bar.style.width = `${game.restaurant.open ? game.restaurant.cycleElapsedWorldMinutes / RESTAURANT_CYCLE_WORLD_MINUTES * 100 : 0}%`;
+    if (bar) bar.style.width = `${game.restaurant.open ? game.restaurant.cycleElapsedWorldMinutes / restaurantCycleWorldMinutes * 100 : 0}%`;
     if (label) label.textContent = game.restaurant.pawned ? "已停止" : game.restaurant.open ? `${worldMinutesRemaining} 游戏分钟后结算` : "餐厅已打烊";
   }
   document.querySelectorAll<HTMLElement>("[data-table-clock]").forEach((clock) => {

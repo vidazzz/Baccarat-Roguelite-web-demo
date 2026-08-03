@@ -1,5 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { Game, LOBBY_ROUND_MS, RESTAURANT_CLOSING_MINUTE, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps } from "./game";
+import {
+  BASE_CONFIDENCE,
+  Game,
+  LOBBY_ROUND_MS,
+  RESTAURANT_CLOSING_MINUTE,
+  RESTAURANT_CYCLE_WORLD_MINUTES,
+  SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES,
+  SLEEP_DEBT_THRESHOLD_WORLD_MINUTES,
+  WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO,
+  WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO,
+  inlineWatchSteps,
+} from "./game";
 import { confidenceRoadStartColumn, type RoundResult } from "./domain";
 
 const historyRound = (outcome: RoundResult["outcome"], id: number): RoundResult => ({
@@ -233,6 +244,104 @@ describe("real-time simulation", () => {
     expect(game.recoverFromSleepDeprivation()).toEqual({ day: 3, hour: 9, minute: 0 });
     expect(game.isSleepDeprived()).toBe(false);
     vi.restoreAllMocks();
+  });
+});
+
+describe("debug gameplay configuration", () => {
+  it("adds or removes 100,000 cash without allowing a negative balance", () => {
+    const game = new Game();
+
+    expect(game.adjustDebugCash(100_000)).toBe(108_000);
+    expect(game.adjustDebugCash(-100_000)).toBe(8_000);
+    expect(game.adjustDebugCash(-100_000)).toBe(0);
+    expect(game.cash).toBe(0);
+  });
+
+  it("uses the configured restaurant payout and cycle duration", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    const before = game.cash;
+    game.setDebugGameplayConfig({ restaurantIncomePerCycle: 125, restaurantCycleWorldMinutes: 30 });
+
+    const tick = game.tickRealtime(2_000, null, false);
+
+    expect(tick.income).toBe(250);
+    expect(game.cash).toBe(before + 250);
+    expect(game.restaurant.cycleElapsedWorldMinutes).toBe(0);
+    vi.restoreAllMocks();
+  });
+
+  it("settles accumulated progress against a newly shortened cycle", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    const before = game.cash;
+    game.restaurant.cycleElapsedWorldMinutes = 55;
+    game.setDebugGameplayConfig({ restaurantIncomePerCycle: 100, restaurantCycleWorldMinutes: 20 });
+
+    game.tickRealtime(2_000, null, false);
+
+    expect(game.cash).toBe(before + 500);
+    expect(game.restaurant.cycleElapsedWorldMinutes).toBe(15);
+    vi.restoreAllMocks();
+  });
+
+  it("uses separate configured world-time rates inside and outside casinos", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.setDebugGameplayConfig({
+      worldMinutesPerRealSecondOutsideCasino: 10,
+      worldMinutesPerRealSecondInsideCasino: 2.5,
+    });
+
+    game.tickRealtime(2_000, null, false);
+    expect(game.worldMinutes).toBe(18 * 60 + 10);
+    game.tickRealtime(3_000, null, true);
+    expect(game.worldMinutes).toBe(18 * 60 + 12.5);
+    vi.restoreAllMocks();
+  });
+
+  it("uses configured daily sleep debt and fatigue threshold", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.setDebugGameplayConfig({
+      sleepDebtPerMidnightWorldMinutes: 3 * 60,
+      sleepDebtThresholdWorldMinutes: 3 * 60,
+    });
+
+    const tick = game.tickRealtime(7_000, null, false);
+
+    expect(game.sleepDebtWorldMinutes).toBe(3 * 60);
+    expect(game.isSleepDeprived()).toBe(true);
+    expect(tick.sleepDeprivationStarted).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it("restores every debug option and returns income to the current level default", () => {
+    const game = new Game();
+    game.setDebugBaseConfidence(0.65);
+    game.setDebugConfidenceForced(true);
+    game.setDebugGameplayConfig({
+      restaurantIncomePerCycle: 999,
+      restaurantCycleWorldMinutes: 12,
+      worldMinutesPerRealSecondOutsideCasino: 15,
+      worldMinutesPerRealSecondInsideCasino: 4,
+      sleepDebtPerMidnightWorldMinutes: 120,
+      sleepDebtThresholdWorldMinutes: 180,
+    });
+    expect(game.upgradeRestaurant()).toBe(true);
+
+    game.resetDebugOptions();
+
+    expect(game.debugBaseConfidence).toBe(BASE_CONFIDENCE);
+    expect(game.debugConfidenceForced).toBe(false);
+    expect(game.debugGameplayConfig).toEqual({
+      restaurantIncomePerCycle: 850,
+      restaurantCycleWorldMinutes: RESTAURANT_CYCLE_WORLD_MINUTES,
+      worldMinutesPerRealSecondOutsideCasino: WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO,
+      worldMinutesPerRealSecondInsideCasino: WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO,
+      sleepDebtPerMidnightWorldMinutes: SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES,
+      sleepDebtThresholdWorldMinutes: SLEEP_DEBT_THRESHOLD_WORLD_MINUTES,
+    });
   });
 });
 

@@ -46,6 +46,15 @@ export interface Restaurant {
   closeAtWorldMinute: number;
 }
 
+export interface DebugGameplayConfig {
+  restaurantIncomePerCycle: number;
+  restaurantCycleWorldMinutes: number;
+  worldMinutesPerRealSecondOutsideCasino: number;
+  worldMinutesPerRealSecondInsideCasino: number;
+  sleepDebtPerMidnightWorldMinutes: number;
+  sleepDebtThresholdWorldMinutes: number;
+}
+
 export interface PendingRound {
   tableId: string;
   result: RoundResult;
@@ -161,6 +170,15 @@ const restaurantLevels = [
   { cost: 18000, income: 3800, pawn: 22000 },
 ];
 
+const defaultDebugGameplayConfig = (): DebugGameplayConfig => ({
+  restaurantIncomePerCycle: restaurantLevels[0]!.income,
+  restaurantCycleWorldMinutes: RESTAURANT_CYCLE_WORLD_MINUTES,
+  worldMinutesPerRealSecondOutsideCasino: WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO,
+  worldMinutesPerRealSecondInsideCasino: WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO,
+  sleepDebtPerMidnightWorldMinutes: SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES,
+  sleepDebtThresholdWorldMinutes: SLEEP_DEBT_THRESHOLD_WORLD_MINUTES,
+});
+
 export class Game {
   cash = 8000;
   restaurant: Restaurant = { level: 1, cycleElapsedWorldMinutes: 0, pawned: false, open: true, closeAtWorldMinute: RESTAURANT_CLOSING_MINUTE };
@@ -185,6 +203,8 @@ export class Game {
   private roadCreations = new Map<string, Side[]>();
   private roundWinStreak = 0;
   private dailyBetProfit = new Map<number, number>();
+  private debugRestaurantIncomeOverride: number | null = null;
+  private debugGameplay = defaultDebugGameplayConfig();
 
   constructor() {
     for (const casino of casinos) {
@@ -521,6 +541,59 @@ export class Game {
     this.refreshDebugConfidence();
   }
 
+  adjustDebugCash(amount: number): number {
+    if (!Number.isFinite(amount)) return this.cash;
+    this.cash = Math.max(0, Math.round(this.cash + amount));
+    return this.cash;
+  }
+
+  get debugGameplayConfig(): DebugGameplayConfig {
+    return {
+      ...this.debugGameplay,
+      restaurantIncomePerCycle: this.debugRestaurantIncomeOverride
+        ?? restaurantLevels[this.restaurant.level - 1]!.income,
+    };
+  }
+
+  setDebugGameplayConfig(values: Partial<DebugGameplayConfig>): void {
+    if (values.restaurantIncomePerCycle !== undefined && Number.isFinite(values.restaurantIncomePerCycle)) {
+      this.debugRestaurantIncomeOverride = Math.max(0, Math.round(values.restaurantIncomePerCycle));
+    }
+    if (values.restaurantCycleWorldMinutes !== undefined && Number.isFinite(values.restaurantCycleWorldMinutes)) {
+      this.debugGameplay.restaurantCycleWorldMinutes = Math.max(1, values.restaurantCycleWorldMinutes);
+    }
+    if (values.worldMinutesPerRealSecondOutsideCasino !== undefined && Number.isFinite(values.worldMinutesPerRealSecondOutsideCasino)) {
+      this.debugGameplay.worldMinutesPerRealSecondOutsideCasino = Math.max(0, values.worldMinutesPerRealSecondOutsideCasino);
+    }
+    if (values.worldMinutesPerRealSecondInsideCasino !== undefined && Number.isFinite(values.worldMinutesPerRealSecondInsideCasino)) {
+      this.debugGameplay.worldMinutesPerRealSecondInsideCasino = Math.max(0, values.worldMinutesPerRealSecondInsideCasino);
+    }
+    if (values.sleepDebtPerMidnightWorldMinutes !== undefined && Number.isFinite(values.sleepDebtPerMidnightWorldMinutes)) {
+      this.debugGameplay.sleepDebtPerMidnightWorldMinutes = Math.max(0, values.sleepDebtPerMidnightWorldMinutes);
+    }
+    if (values.sleepDebtThresholdWorldMinutes !== undefined && Number.isFinite(values.sleepDebtThresholdWorldMinutes)) {
+      this.debugGameplay.sleepDebtThresholdWorldMinutes = Math.max(1, values.sleepDebtThresholdWorldMinutes);
+      this.refreshSleepDeprivationSchedule();
+    }
+  }
+
+  resetDebugOptions(): void {
+    this.debugBaseConfidence = BASE_CONFIDENCE;
+    this.debugConfidenceForced = false;
+    this.debugRestaurantIncomeOverride = null;
+    this.debugGameplay = defaultDebugGameplayConfig();
+    this.refreshDebugConfidence();
+    this.refreshSleepDeprivationSchedule();
+  }
+
+  private refreshSleepDeprivationSchedule(): void {
+    if (this.sleepDebtWorldMinutes >= this.debugGameplay.sleepDebtThresholdWorldMinutes) {
+      this.sleepDeprivationCollapseAtWorldMinute ??= nextSleepDeprivationCheckAt(this.worldMinutes);
+    } else {
+      this.sleepDeprivationCollapseAtWorldMinute = null;
+    }
+  }
+
   private refreshDebugConfidence(): void {
     if (this.pending) {
       const breakdown = this.pending.confidenceBreakdown;
@@ -603,16 +676,18 @@ export class Game {
     const elapsed = Math.max(0, now - this.lastRealtimeAt);
     this.lastRealtimeAt = now;
     const worldMinutesPerRealSecond = insideCasino
-      ? WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO
-      : WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO;
+      ? this.debugGameplay.worldMinutesPerRealSecondInsideCasino
+      : this.debugGameplay.worldMinutesPerRealSecondOutsideCasino;
     const requestedWorldMinutes = worldTimePaused ? 0 : elapsed / 1000 * worldMinutesPerRealSecond;
-    const wasSleepDeprived = this.sleepDebtWorldMinutes >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES;
+    const sleepDebtThreshold = this.debugGameplay.sleepDebtThresholdWorldMinutes;
+    const sleepDebtPerMidnight = this.debugGameplay.sleepDebtPerMidnightWorldMinutes;
+    const wasSleepDeprived = this.sleepDebtWorldMinutes >= sleepDebtThreshold;
     const closeInMinutes = this.restaurant.open ? this.restaurant.closeAtWorldMinute - this.worldMinutes : Number.POSITIVE_INFINITY;
     const crossesRestaurantClose = requestedWorldMinutes > 0 && closeInMinutes >= 0 && closeInMinutes <= requestedWorldMinutes;
     const restaurantPromptInMinutes = pauseAtRestaurantClose && crossesRestaurantClose ? closeInMinutes : Number.POSITIVE_INFINITY;
-    const sleepDebtThresholdInMinutes = this.sleepDebtWorldMinutes >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES
+    const sleepDebtThresholdInMinutes = this.sleepDebtWorldMinutes >= sleepDebtThreshold || sleepDebtPerMidnight <= 0
       ? Number.POSITIVE_INFINITY
-      : this.nextSleepDebtAtWorldMinute - this.worldMinutes + Math.max(0, Math.ceil((SLEEP_DEBT_THRESHOLD_WORLD_MINUTES - this.sleepDebtWorldMinutes) / SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES) - 1) * 1440;
+      : this.nextSleepDebtAtWorldMinute - this.worldMinutes + Math.max(0, Math.ceil((sleepDebtThreshold - this.sleepDebtWorldMinutes) / sleepDebtPerMidnight) - 1) * 1440;
     const reachesSleepDebtThreshold = requestedWorldMinutes > 0
       && sleepDebtThresholdInMinutes >= 0
       && sleepDebtThresholdInMinutes <= Math.min(requestedWorldMinutes, restaurantPromptInMinutes);
@@ -637,19 +712,19 @@ export class Game {
       ? Math.floor((this.worldMinutes - this.nextSleepDebtAtWorldMinute) / 1440) + 1
       : 0;
     if (crossedMidnights > 0) {
-      this.sleepDebtWorldMinutes += crossedMidnights * SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES;
+      this.sleepDebtWorldMinutes += crossedMidnights * sleepDebtPerMidnight;
       this.nextSleepDebtAtWorldMinute += crossedMidnights * 1440;
     }
-    const sleepDeprivationStarted = reachesSleepDebtThreshold || (!wasSleepDeprived && this.sleepDebtWorldMinutes >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES);
+    const sleepDeprivationStarted = reachesSleepDebtThreshold || (!wasSleepDeprived && this.sleepDebtWorldMinutes >= sleepDebtThreshold);
     let income = 0;
     let tablesAdvanced = 0;
     const advancedTableIds: string[] = [];
 
     if (!this.restaurant.pawned && restaurantOperatingMinutes > 0) {
       this.restaurant.cycleElapsedWorldMinutes += restaurantOperatingMinutes;
-      while (this.restaurant.cycleElapsedWorldMinutes >= RESTAURANT_CYCLE_WORLD_MINUTES) {
-        this.restaurant.cycleElapsedWorldMinutes -= RESTAURANT_CYCLE_WORLD_MINUTES;
-        const payout = restaurantLevels[this.restaurant.level - 1]!.income;
+      while (this.restaurant.cycleElapsedWorldMinutes >= this.debugGameplay.restaurantCycleWorldMinutes) {
+        this.restaurant.cycleElapsedWorldMinutes -= this.debugGameplay.restaurantCycleWorldMinutes;
+        const payout = this.debugRestaurantIncomeOverride ?? restaurantLevels[this.restaurant.level - 1]!.income;
         this.cash += payout;
         income += payout;
       }
@@ -720,7 +795,7 @@ export class Game {
       }
       remainingDebt -= minutesUntilMidnight;
       wakeAt = nextMidnight;
-      remainingDebt += SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES;
+      remainingDebt += this.debugGameplay.sleepDebtPerMidnightWorldMinutes;
     }
     return this.finishRest(wakeAt);
   }
@@ -738,14 +813,14 @@ export class Game {
       const segmentEnd = Math.min(wakeAt, nextMidnight);
       remainingDebt = Math.max(0, remainingDebt - (segmentEnd - cursor));
       cursor = segmentEnd;
-      if (cursor === nextMidnight) remainingDebt += SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES;
+      if (cursor === nextMidnight) remainingDebt += this.debugGameplay.sleepDebtPerMidnightWorldMinutes;
     }
     this.closeRestaurant();
     this.worldMinutes = wakeAt;
     this.lastSleepDurationWorldMinutes = wakeAt - restStartedAt;
     this.sleepDebtWorldMinutes = remainingDebt;
     this.nextSleepDebtAtWorldMinute = Math.floor(wakeAt / 1440) * 1440 + 1440;
-    this.sleepDeprivationCollapseAtWorldMinute = remainingDebt >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES
+    this.sleepDeprivationCollapseAtWorldMinute = remainingDebt >= this.debugGameplay.sleepDebtThresholdWorldMinutes
       ? nextSleepDeprivationCheckAt(wakeAt)
       : null;
     this.lastRealtimeAt = Date.now();
@@ -753,7 +828,7 @@ export class Game {
   }
 
   isSleepDeprived(): boolean {
-    return this.sleepDebtWorldMinutes >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES;
+    return this.sleepDebtWorldMinutes >= this.debugGameplay.sleepDebtThresholdWorldMinutes;
   }
 
   recoverFromSleepDeprivation(): { day: number; hour: number; minute: number } {
@@ -781,7 +856,7 @@ export class Game {
   restaurantInfo() {
     const current = restaurantLevels[this.restaurant.level - 1]!;
     const next = restaurantLevels[this.restaurant.level];
-    return { ...current, nextCost: next?.cost ?? null };
+    return { ...current, income: this.debugRestaurantIncomeOverride ?? current.income, nextCost: next?.cost ?? null };
   }
 
   worldTimeInfo(): { day: number; hour: number; minute: number } {
