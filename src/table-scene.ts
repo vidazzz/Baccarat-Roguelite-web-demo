@@ -8,6 +8,17 @@ export interface TableCard {
   handIndex: number;
 }
 
+export type CardRevealActor = "self" | "dealer";
+
+export function cardRevealActor(cardSide: Side, ownedSide: Side | null): CardRevealActor {
+  return ownedSide === cardSide ? "self" : "dealer";
+}
+
+export function unrevealedDealtCardIndices(dealtCardCount: number, revealed: ReadonlySet<number>): number[] {
+  return Array.from({ length: Math.max(0, Math.floor(dealtCardCount)) }, (_, index) => index)
+    .filter((index) => !revealed.has(index));
+}
+
 export interface TableCardPositions {
   table: { x: number; y: number; z: number };
   resting: { x: number; y: number; z: number };
@@ -179,6 +190,9 @@ export class TableScene {
   private chipTransferStartedAt = 0;
   private chipTransferDone = false;
   private onChipTransferComplete: () => void = () => undefined;
+  private selectableCardIndices = new Set<number>();
+  private hoveredCardIndex: number | null = null;
+  private onCardSelect: (index: number) => void = () => undefined;
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
@@ -236,6 +250,16 @@ export class TableScene {
       lookAt: new THREE.Vector3(entry.target.x, 0, entry.target.z),
       done: onDone,
     };
+  }
+
+  setCardSelection(indices: number[], onSelect: (index: number) => void): void {
+    this.clearCardHover();
+    this.selectableCardIndices = new Set(indices.filter((index) => {
+      const entry = this.cards[index];
+      return Boolean(entry && !entry.revealed);
+    }));
+    this.onCardSelect = onSelect;
+    this.renderer.domElement.style.cursor = this.selectableCardIndices.size ? "pointer" : "default";
   }
 
   activeCardScreenBounds(): { left: number; top: number; right: number; bottom: number } | null {
@@ -587,7 +611,18 @@ export class TableScene {
   }
 
   private pointerDown = (event: PointerEvent) => {
-    if (this.squeezeIndex === null || this.squeezeProgress >= 1 || this.squeezeCompleting || this.squeezePaused) return;
+    if (this.squeezeIndex === null) {
+      const index = this.selectableCardAtPointer(event);
+      if (index === null) return;
+      if (event.cancelable) event.preventDefault();
+      const onSelect = this.onCardSelect;
+      this.selectableCardIndices.clear();
+      this.clearCardHover();
+      this.renderer.domElement.style.cursor = "default";
+      onSelect(index);
+      return;
+    }
+    if (this.squeezeProgress >= 1 || this.squeezeCompleting || this.squeezePaused) return;
     const local = this.pointerOnCardPlane(event);
     if (!local) return;
     const entry = this.cards[this.squeezeIndex]!;
@@ -612,6 +647,16 @@ export class TableScene {
   };
 
   private pointerMove = (event: PointerEvent) => {
+    if (this.squeezeIndex === null) {
+      const hovered = this.selectableCardAtPointer(event);
+      if (hovered !== this.hoveredCardIndex) {
+        this.clearCardHover();
+        this.hoveredCardIndex = hovered;
+        if (hovered !== null) this.cards[hovered]!.group.scale.set(1.04, 1.04, 1.04);
+      }
+      this.renderer.domElement.style.cursor = hovered === null ? "default" : "pointer";
+      return;
+    }
     if (!this.squeezeDragging) return;
     if (event.cancelable) event.preventDefault();
     const local = this.pointerOnCardPlane(event);
@@ -716,6 +761,34 @@ export class TableScene {
     const worldPoint = entry.group.localToWorld(new THREE.Vector3(0, 0, 0));
     const intersection = raycaster.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(worldNormal, worldPoint), new THREE.Vector3());
     return intersection ? entry.group.worldToLocal(intersection) : null;
+  }
+
+  private selectableCardAtPointer(event: PointerEvent): number | null {
+    if (!this.selectableCardIndices.size) return null;
+    const bounds = this.renderer.domElement.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return null;
+    const pointer = new THREE.Vector2(
+      (event.clientX - bounds.left) / bounds.width * 2 - 1,
+      -((event.clientY - bounds.top) / bounds.height) * 2 + 1,
+    );
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(pointer, this.camera);
+    this.scene.updateMatrixWorld(true);
+    const meshes = [...this.selectableCardIndices].flatMap((index) => {
+      const entry = this.cards[index];
+      return entry ? [entry.back, entry.face] : [];
+    });
+    const hit = raycaster.intersectObjects(meshes, false)[0]?.object;
+    if (!hit) return null;
+    return [...this.selectableCardIndices].find((index) => {
+      const entry = this.cards[index];
+      return entry?.back === hit || entry?.face === hit;
+    }) ?? null;
+  }
+
+  private clearCardHover(): void {
+    if (this.hoveredCardIndex !== null) this.cards[this.hoveredCardIndex]?.group.scale.set(1, 1, 1);
+    this.hoveredCardIndex = null;
   }
 
   private foldSupport(normal: THREE.Vector2): number {

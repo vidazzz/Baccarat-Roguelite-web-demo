@@ -431,7 +431,7 @@ describe("casino entry fees", () => {
 });
 
 describe("confidence settlement", () => {
-  it("starts with zero base confidence and clears every road mark on a table", () => {
+  it("starts with zero base confidence and clears every road plan on a table", () => {
     const game = new Game();
     const table = game.table("harbor-1");
 
@@ -441,11 +441,14 @@ describe("confidence settlement", () => {
     game.markRoad(table.id, "big", 0, 0);
     game.markRoad(table.id, "small", 0, 0);
     game.markCurrentBeadRoad(table.id);
-    game.clearRoadMarks(table.id);
+    game.appendRoadCreation(table.id, "banker");
+    game.appendRoadCreation(table.id, "player");
+    game.clearRoadPlanning(table.id);
 
     expect(game.roadMark(table.id, "bead")).toBeNull();
     expect(game.roadMark(table.id, "big")).toBeNull();
     expect(game.roadMark(table.id, "small")).toBeNull();
+    expect(game.roadCreationSequence(table.id)).toEqual([]);
   });
 
   it("projects one created result into every road calculation and lets it form a marked road", () => {

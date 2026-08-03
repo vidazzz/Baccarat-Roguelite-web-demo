@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, SQUEEZE_COMPLETE_PROGRESS, divineMashRetreatRatioPerMs, settlementChipPositions, snapSqueezeDirection, tableCardPositions } from "./table-scene";
+import { cardRevealActor, composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, SQUEEZE_COMPLETE_PROGRESS, divineMashRetreatRatioPerMs, settlementChipPositions, snapSqueezeDirection, tableCardPositions, unrevealedDealtCardIndices } from "./table-scene";
+
+describe("direct card selection", () => {
+  it("keeps every unrevealed dealt card selectable regardless of its position", () => {
+    expect(unrevealedDealtCardIndices(4, new Set([2]))).toEqual([0, 1, 3]);
+    expect(unrevealedDealtCardIndices(6, new Set([0, 3, 5]))).toEqual([1, 2, 4]);
+  });
+
+  it("uses self reveal only for the wager-owned side", () => {
+    expect(cardRevealActor("player", "player")).toBe("self");
+    expect(cardRevealActor("banker", "player")).toBe("dealer");
+    expect(cardRevealActor("player", null)).toBe("dealer");
+    expect(cardRevealActor("banker", null)).toBe("dealer");
+  });
+});
 
 describe("squeeze direction snapping", () => {
   it("snaps the player-facing long edge, lower-left corner and short edge", () => {

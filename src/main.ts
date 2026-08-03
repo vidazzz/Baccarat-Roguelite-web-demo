@@ -8,7 +8,7 @@ import restaurantAsset from "./restaurant.jpg";
 import { cardFaceAsset } from "./card-assets";
 import { cardLabel, cardValue, confidenceRoadStartColumn, forecastBaccaratReveal, makeBeadPlate, makeBigRoad, makeDerivedRoads, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type DerivedRoadColor, type Outcome, type RoadBook, type RoundResult, type Side } from "./domain";
 import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, inlineWatchSteps, skillDefinitions, type Casino, type DebugGameplayConfig, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
-import { composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, divineMashRetreatRatioPerMs, TableScene, type TableChip } from "./table-scene";
+import { cardRevealActor, composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, divineMashRetreatRatioPerMs, TableScene, unrevealedDealtCardIndices, type TableChip } from "./table-scene";
 
 type View = "map" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
 type Activity = "restaurant" | "casino" | "home";
@@ -164,11 +164,14 @@ const worldTimePaused = () => activeActivity === "home"
   || (debugMenuOpen && view === "dealing");
 
 function shell(content: string): string {
-  const backAction = view === "lobby" ? "casinos" : "map";
-  const backLabel = view === "lobby" ? "返回赌场" : "回到地图";
+  const atTable = view === "table" || view === "dealing";
+  const backAction = atTable ? "lobby" : view === "lobby" ? "casinos" : "map";
+  const backLabel = atTable ? "返回大厅" : view === "lobby" ? "返回赌场" : "回到地图";
+  const backDisabled = (view === "table" && inlineWatchActive && !inlineWatchSettled)
+    || (view === "dealing" && dealStage === "settling-chips");
   return `
     <header class="topbar">
-      <button class="brand ${view === "map" ? "brand-map-hidden" : ""}" data-action="${backAction}" aria-label="${backLabel}">${backLabel}</button>
+      <button class="brand back-navigation ${view === "map" ? "brand-map-hidden" : ""}" data-action="${backAction}" aria-label="${backLabel}" ${backDisabled ? "disabled" : ""}><i aria-hidden="true">←</i><span>${backLabel}</span></button>
       <div class="world-clock ${worldTimePaused() ? "paused" : ""} ${game.isSleepDeprived() ? "sleep-deprived" : ""}"><span>世界时间</span><strong data-world-clock>${worldTimeLabel()}</strong><em class="sleep-status" data-sleep-status ${game.isSleepDeprived() ? "" : "hidden"}>睡眠不足</em></div>
       <div class="confidence"><span>信心</span><strong>${Math.round(game.confidence * 100)}%</strong></div>
       <div class="wallet"><span>可用现金</span><strong>${money(game.cash)}</strong></div>
@@ -408,7 +411,7 @@ function lobbyView(): string {
   const tables = [...game.tables.values()].filter((table) => table.id.startsWith(casino.id));
   return shell(`
     <section class="page lobby-page ${casino.tone}">
-      <div class="lobby-heading"><div><p class="eyebrow">${casino.subtitle}</p><h1>${casino.name}</h1></div><div class="lobby-heading-actions"><button class="secondary" data-action="casinos">更换赌场</button><div class="legend"><span><i class="banker"></i>庄</span><span><i class="player"></i>闲</span><span><i class="tie"></i>和</span></div></div></div>
+      <div class="lobby-heading"><div><p class="eyebrow">${casino.subtitle}</p><h1>${casino.name}</h1></div></div>
       <div class="tables-grid">${tables.map((table) => `<button class="table-card" data-table="${table.id}">${lobbyTableContent(table, casino)}</button>`).join("")}</div>
     </section>
   `);
@@ -488,20 +491,20 @@ function tableView(): string {
   const canConfirm = Boolean(stagedBetSide) && stagedAmount >= casino.minBet && stagedAmount <= casino.maxBet;
   return shell(`
     <section class="table-page">
-      <div class="table-header"><span class="table-header-actions"><button class="secondary table-lobby-link" data-action="lobby" ${inlineWatchActive && !inlineWatchSettled ? "disabled" : ""}>返回大厅</button></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${inlineWatchSettled ? table.round : table.round + 1} 局</span></div>
+      <div class="table-header"><span class="table-header-spacer" aria-hidden="true"></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${inlineWatchSettled ? table.round : table.round + 1} 局</span></div>
       <div class="table-layout">
         <section class="betting-panel ${inlineWatchActive ? "inline-watching" : ""}">
           <div class="table-felt ${inlineWatchActive ? "watch-active" : ""}">
-            <div class="table-session-meta"><span>${inlineWatchActive ? `旁观牌局 · ${inlineWatchStatus(watchPending!)}` : `限红 ${money(casino.minBet)} - ${money(casino.maxBet)}`}</span><button class="secondary" data-action="watch" ${inlineWatchActive ? "disabled" : ""}>旁观本局</button></div>
+            <div class="table-session-meta"><span>${inlineWatchActive ? `旁观牌局 · ${inlineWatchStatus(watchPending!)}` : `限红 ${money(casino.minBet)} - ${money(casino.maxBet)}`}</span></div>
             <div class="dealer-apron ${inlineWatchActive ? "inline-watch-apron" : ""}">${inlineWatchActive ? `${inlineWatchHand(watchPending!, "player")}<strong>${inlineWatchStatus(watchPending!)}</strong>${inlineWatchHand(watchPending!, "banker")}` : `<div class="table-hand-placement player"><span>PLAYER</span><i></i><i></i></div><strong>风云</strong><div class="table-hand-placement banker"><span>BANKER</span><i></i><i></i></div>`}</div>
             <div class="bet-zones">${zone("player", "PLAYER", "1:1", probability.player)}${zone("tie", "TIE", "1:8", probability.tie)}${zone("banker", "BANKER", "1:0.95", probability.banker)}</div>
             ${watchResult ? `<div class="inline-watch-result ${watchResult.outcome}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭旁观结算"><i>${watchResult.outcome === "tie" ? "和" : outcomeName(watchResult.outcome)}</i><span>旁观结算</span><h2>${watchResult.outcome === "tie" ? "本局和局" : `${outcomeName(watchResult.outcome)}家胜`}</h2><p>庄 ${watchResult.bankerPoints} 点 · 闲 ${watchResult.playerPoints} 点</p><small>点击任意位置返回牌桌</small></div>` : ""}
           </div>
           <div class="bet-controls">
-            <div class="bet-command-bar">
-              <button class="secondary" data-action="cancel-bet" ${stagedAmount <= 0 || inlineWatchActive ? "disabled" : ""}><span>↶</span>取消</button>
-              <button class="primary" data-action="confirm-bet" ${canConfirm && !inlineWatchActive ? "" : "disabled"}><span>✓</span>确认</button>
-            </div>
+            ${inlineWatchActive ? "" : stagedAmount > 0 ? `<div class="bet-command-bar">
+              <button class="secondary" data-action="cancel-bet"><span>↶</span>取消</button>
+              <button class="primary" data-action="confirm-bet" ${canConfirm ? "" : "disabled"}><span>✓</span>确认</button>
+            </div>` : `<div class="bet-command-bar single-action"><button class="secondary chip-watch-action" data-action="watch">旁观本局</button></div>`}
             <div class="chip-console">
               <div class="chip-tray" aria-label="筹码面额">${denominations.map((amount, index) => `<button class="bet-chip chip-${index + 1} ${selectedChip === amount ? "selected" : ""}" data-chip="${amount}" aria-label="选择${money(amount)}筹码" ${inlineWatchActive ? "disabled" : ""}><span>${amount >= 1000 ? `${amount / 1000}K` : amount}</span></button>`).join("")}</div>
               <div class="stake-summary"><span>${inlineWatchActive ? "旁观中" : stagedBetSide ? `已押${outcomeName(stagedBetSide)}` : "尚未落注"}</span><strong>${inlineWatchActive ? "—" : money(stagedAmount)}</strong><small>${inlineWatchActive ? inlineWatchStatus(watchPending!) : betDraftNotice}</small></div>
@@ -543,14 +546,6 @@ function dealSequence(pending: PendingRound): DealtCard[] {
 
 function playerOwnedSide(pending: PendingRound): Side | null {
   return pending.bet && pending.bet.side !== "tie" ? pending.bet.side : null;
-}
-
-function nextUnrevealedForSide(pending: PendingRound, side: Side): number | null {
-  const sequence = dealSequence(pending);
-  const next = sequence.map((entry, index) => ({ entry, index }))
-    .filter(({ entry, index }) => index < dealtCardCount && entry.side === side && !revealedCardIndices.has(index))
-    .sort((a, b) => a.entry.handIndex - b.entry.handIndex)[0];
-  return next?.index ?? null;
 }
 
 function automaticRevealOrder(pending: PendingRound): number[] {
@@ -684,18 +679,6 @@ function dealingView(): string {
   const probability = game.previewProbability(tableId);
   const sequence = dealSequence(pending);
   const isWatching = pending.bet === null;
-  const ownedSide = playerOwnedSide(pending);
-  const dealerSide: Side | null = ownedSide ? ownedSide === "banker" ? "player" : "banker" : null;
-  const selfNext = ownedSide ? nextUnrevealedForSide(pending, ownedSide) : null;
-  const dealerNext = dealerSide ? nextUnrevealedForSide(pending, dealerSide) : null;
-  const finalCardForecast = currentCardForecast(pending);
-  const revealChoice = dealStage === "awaiting-card" && ownedSide
-    ? finalCardForecast
-      ? `<div class="last-card-action-bar">${finalCardForecast}<div class="last-card-actions"><span>选择开牌方式</span><div><button class="primary" data-action="reveal-self" ${selfNext === null ? "disabled" : ""}>自己开${outcomeName(ownedSide)}家末张</button><button class="secondary" data-action="reveal-dealer" ${dealerNext === null ? "disabled" : ""}>荷官开${outcomeName(dealerSide!)}家末张</button></div></div></div>`
-      : `<div class="reveal-choice"><span>选择下一张牌</span><div><button class="primary" data-action="reveal-self" ${selfNext === null ? "disabled" : ""}>自己开${outcomeName(ownedSide)}家下一张</button><button class="secondary" data-action="reveal-dealer" ${dealerNext === null ? "disabled" : ""}>荷官开${outcomeName(dealerSide!)}家下一张</button></div><small>${outcomeName(ownedSide)}家剩 ${sequence.filter((entry, index) => index < dealtCardCount && entry.side === ownedSide && !revealedCardIndices.has(index)).length} 张 · ${outcomeName(dealerSide!)}家剩 ${sequence.filter((entry, index) => index < dealtCardCount && entry.side === dealerSide && !revealedCardIndices.has(index)).length} 张</small></div>`
-    : dealStage === "dealer-revealing" && finalCardForecast
-      ? `<div class="last-card-action-bar dealer-opening">${finalCardForecast}</div>`
-      : "";
   const result = dealStage === "settled" ? pending.result : null;
   const confidenceFeedback = `封盘结算 · ${Math.round(pending.confidence * 100)}%`;
   const delta = lastSettlement?.delta ?? 0;
@@ -708,15 +691,14 @@ function dealingView(): string {
   const statusTitle = dealStage === "settled" ? result!.outcome === "tie" ? "和局" : `${outcomeName(result!.outcome)}家胜` : dealStage === "settling-chips" ? chipTransferLabel : dealStage === "animating" ? "荷官发牌" : dealStage === "drawing-card" ? `${outcomeName(sequence[dealtCardCount - 1]!.side)}家补牌` : dealStage === "dealer-revealing" ? "荷官开牌" : `剩余 ${dealtCardCount - revealedCardIndices.size} 张未开`;
   return shell(`
     <section class="table-page table-dealing immersive-dealing ${dealStage}">
-      <div class="table-header"><span class="table-header-actions"><button class="secondary table-lobby-link" data-action="lobby" ${dealStage === "settling-chips" ? "disabled" : ""}>返回大厅</button></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${dealStage === "settled" || dealStage === "settling-chips" ? table.round : table.round + 1} 局</span></div>
+      <div class="table-header"><span class="table-header-spacer" aria-hidden="true"></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${dealStage === "settled" || dealStage === "settling-chips" ? table.round : table.round + 1} 局</span></div>
       <div class="table-layout">
         <section class="betting-panel live-deal-panel">
-          <div class="deal-status"><div class="deal-status-title"><p class="eyebrow">${dealStage === "settled" ? betFeedback : isWatching ? "旁观牌局" : `已押${outcomeName(pending.bet!.side)} · ${money(pending.bet!.amount)}`}</p><h1>${statusTitle}</h1></div>${dealStage === "settled" ? "" : liveBaccaratScore(pending)}<span>${dealStage === "settled" ? `庄 ${result!.bankerPoints} 点 · 闲 ${result!.playerPoints} 点` : ownedSide ? confidenceFeedback : "本局全部由荷官开牌 · 信心不变"}</span>${dealStage !== "settled" ? confidenceBreakdownView(pending) : ""}</div>
+          <div class="deal-status"><div class="deal-status-title"><p class="eyebrow">${dealStage === "settled" ? betFeedback : isWatching ? "旁观牌局" : `已押${outcomeName(pending.bet!.side)} · ${money(pending.bet!.amount)}`}</p><h1>${statusTitle}</h1></div>${dealStage === "settled" ? "" : liveBaccaratScore(pending)}<span>${dealStage === "settled" ? `庄 ${result!.bankerPoints} 点 · 闲 ${result!.playerPoints} 点` : pending.bet ? confidenceFeedback : "本局全部由荷官开牌 · 信心不变"}</span>${dealStage !== "settled" ? confidenceBreakdownView(pending) : ""}</div>
           <div class="immersive-table-stage">
             <div id="table-3d-stage" aria-label="3D百家乐牌桌"></div>
             ${pending.bet && dealStage !== "settling-chips" ? `<div class="active-bet-marker ${pending.bet.side}"><i></i><span>押${outcomeName(pending.bet.side)}</span><strong>${money(pending.bet.amount)}</strong></div>` : ""}
             ${dealStage === "settling-chips" ? `<div class="chip-transfer-callout ${chipSettlementKind}"><span>${chipSettlementKind === "win" ? "PAYOUT" : chipSettlementKind === "lose" ? "COLLECT" : "PUSH"}</span><strong>${chipTransferLabel}</strong></div>` : ""}
-            ${revealChoice}
             ${dealStage === "settled" ? `<div class="table-settlement ${settlementKind}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭结算"><section class="settlement-verdict"><i>${settlementSeal}</i><span>本局 ${outcomeName(result!.outcome)}${result!.outcome === "tie" ? "局" : "家胜"}</span><b>${betFeedback}</b><strong>${settlementAmount}</strong>${pending.bet ? `<small>押${outcomeName(pending.bet.side)} · ${money(pending.bet.amount)}</small>` : ""}${lastSettlement?.income ? `<em>餐厅同期到账 +${money(lastSettlement.income)}</em>` : ""}</section><div class="settlement-hands"><div><span>庄家 · ${result!.bankerPoints} 点</span><strong>${result!.bankerCards.map(cardLabel).join(" · ")}</strong></div><div><span>闲家 · ${result!.playerPoints} 点</span><strong>${result!.playerCards.map(cardLabel).join(" · ")}</strong></div></div><small class="settlement-dismiss-hint">点击任意位置返回牌桌</small></div>` : ""}
           </div>
         </section>
@@ -913,7 +895,7 @@ function setupDealing(): void {
   const sequence = dealSequence(pending);
   const animateFromIndex = dealStage === "animating" ? 0 : dealStage === "drawing-card" ? dealtCardCount - 1 : null;
   tableScene.deal(sequence.slice(0, dealtCardCount), revealedCardIndices, () => {
-    if (playerOwnedSide(pending)) {
+    if (pending.bet) {
       dealStage = "awaiting-card";
       render();
     } else {
@@ -921,6 +903,10 @@ function setupDealing(): void {
       render();
     }
   }, animateFromIndex, playerOwnedSide(pending));
+  if (dealStage === "awaiting-card" && pending.bet) {
+    const selectable = unrevealedDealtCardIndices(dealtCardCount, revealedCardIndices);
+    tableScene.setCardSelection(selectable, selectCardForReveal);
+  }
   const denominations = chipDenominations(casino);
   const recordedWagerTotal = roundWagerChips.reduce((sum, chip) => sum + chip.value, 0);
   const wagerChips = pending.bet && recordedWagerTotal === pending.bet.amount
@@ -939,6 +925,18 @@ function setupDealing(): void {
   }
   if (dealStage === "dealer-revealing") viewTimers.push(window.setTimeout(revealNextAutomatically, 280));
   if (dealStage === "settled" && divineSpecialPending && !roadCreationFailure) viewTimers.push(window.setTimeout(showDivineSpecialEvent, 320));
+}
+
+function selectCardForReveal(index: number): void {
+  const pending = game.pending;
+  if (!pending?.bet || dealStage !== "awaiting-card" || index >= dealtCardCount || revealedCardIndices.has(index) || !tableScene) return;
+  const entry = dealSequence(pending)[index];
+  if (!entry) return;
+  const ownedSide = playerOwnedSide(pending);
+  tableScene.focus(index, () => {
+    if (cardRevealActor(entry.side, ownedSide) === "self") beginSqueeze(index, armDivineAssist(index));
+    else revealFocusedCardByDealer(index);
+  });
 }
 
 function finishReveal(index: number): void {
@@ -1290,7 +1288,12 @@ function bind(): void {
       view = "skills";
     }
     if (action === "casinos") { activeActivity = "casino"; view = "casino-select"; }
-    if (action === "lobby") view = "lobby";
+    if (action === "lobby") {
+      game.clearRoadPlanning(tableId);
+      roadMarkFeedback = null;
+      roadCreationFailure = null;
+      view = "lobby";
+    }
     if (action === "upgrade") game.upgradeRestaurant();
     if (action === "pawn" && confirm(`典当后餐厅将停止产出。确认典当并获得 ${money(game.restaurantInfo().pawn)}？`)) game.pawnRestaurant();
     if (action === "close-restaurant") {
@@ -1377,25 +1380,6 @@ function bind(): void {
       game.play(tableId, { side: stagedBetSide, amount: game.reservedBetAmount });
       resetBetDraft(false);
       revealedCardIndices.clear(); divineCheckedStages.clear(); divineRevealFeedback.clear(); divineActivationsThisRound = 0; divineSpecialPending = false; tablePlayerInteractionActive = false; dealtCardCount = 4; dealStage = "animating"; view = "dealing";
-    }
-    if (action === "reveal-self") {
-      const pending = game.pending!;
-      const side = playerOwnedSide(pending)!;
-      const index = nextUnrevealedForSide(pending, side);
-      if (index !== null && tableScene) {
-        tableScene.focus(index, () => beginSqueeze(index, armDivineAssist(index)));
-      }
-      return;
-    }
-    if (action === "reveal-dealer") {
-      const pending = game.pending!;
-      const side = playerOwnedSide(pending)! === "banker" ? "player" : "banker";
-      const index = nextUnrevealedForSide(pending, side);
-      if (index !== null && tableScene) {
-        document.querySelector<HTMLElement>(".last-card-action-bar")?.classList.add("dealer-opening");
-        tableScene.focus(index, () => revealFocusedCardByDealer(index));
-      }
-      return;
     }
     if (action === "dismiss-settlement") {
       if (inlineWatchActive) resetInlineWatch();

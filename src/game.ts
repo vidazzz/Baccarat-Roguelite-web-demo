@@ -368,6 +368,11 @@ export class Game {
     }
   }
 
+  clearRoadPlanning(tableId: string): void {
+    this.clearRoadMarks(tableId);
+    this.roadCreations.delete(tableId);
+  }
+
   markedRoadPatterns(tableId: string): ConfidenceRoadPattern[] {
     this.table(tableId);
     const history = this.roadAnalysisHistory(tableId);
