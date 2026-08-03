@@ -42,6 +42,8 @@ export interface Restaurant {
   level: number;
   cycleElapsedWorldMinutes: number;
   pawned: boolean;
+  open: boolean;
+  closeAtWorldMinute: number;
 }
 
 export interface PendingRound {
@@ -130,11 +132,21 @@ export const casinos: Casino[] = [
 
 export const LOBBY_ROUND_MS = 8_000;
 export const RESTAURANT_CYCLE_WORLD_MINUTES = 60;
+export const RESTAURANT_OPENING_MINUTE = 8 * 60;
+export const RESTAURANT_CLOSING_MINUTE = 20 * 60;
+export const MINIMUM_NATURAL_WAKE_DEBT_WORLD_MINUTES = 60;
+export const SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES = 8 * 60;
+export const SLEEP_DEBT_THRESHOLD_WORLD_MINUTES = 10 * 60;
 export const WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO = 60;
 export const WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO = 1;
 export const MAX_SKILL_LEVEL = 5;
 export const BASE_CONFIDENCE = 0;
 const MAX_TABLE_HISTORY = 240;
+const nextSleepDeprivationCheckAt = (worldMinute: number): number => {
+  const dayStart = Math.floor(worldMinute / 1440) * 1440;
+  const todayAtOpening = dayStart + RESTAURANT_OPENING_MINUTE;
+  return worldMinute < todayAtOpening ? todayAtOpening : todayAtOpening + 1440;
+};
 
 export const skillDefinitions: SkillDefinition[] = [
   { id: "long-banker", name: "长庄术", roadName: "长庄", description: "连续庄赢时预测庄势延续。", baseUpgradeCost: 1200 },
@@ -151,7 +163,7 @@ const restaurantLevels = [
 
 export class Game {
   cash = 8000;
-  restaurant: Restaurant = { level: 1, cycleElapsedWorldMinutes: 0, pawned: false };
+  restaurant: Restaurant = { level: 1, cycleElapsedWorldMinutes: 0, pawned: false, open: true, closeAtWorldMinute: RESTAURANT_CLOSING_MINUTE };
   worldMinutes = 18 * 60;
   skills: Record<PatternId, number> = { "long-banker": 2, "long-player": 1, "ping-pong": 1, none: 0 };
   equippedSkill: SkillId | null = "long-banker";
@@ -161,6 +173,10 @@ export class Game {
   tables = new Map<string, GameTable>();
   pending: PendingRound | null = null;
   nextRoundEffect: NextRoundEffect | null = null;
+  sleepDebtWorldMinutes = 0;
+  sleepDeprivationCollapseAtWorldMinute: number | null = null;
+  nextSleepDebtAtWorldMinute = 1440;
+  lastSleepDurationWorldMinutes = 0;
   notice = "先看路，再下注。";
   private rng: Rng = createRng(20260729);
   private lastRealtimeAt = Date.now();
@@ -583,20 +599,54 @@ export class Game {
     return { delta, income: 0, roadCreation };
   }
 
-  tickRealtime(now: number, pausedTableId: string | null, insideCasino = false, worldTimePaused = false): { income: number; tablesAdvanced: number; advancedTableIds: string[] } {
+  tickRealtime(now: number, pausedTableId: string | null, insideCasino = false, worldTimePaused = false, pauseAtRestaurantClose = false): { income: number; tablesAdvanced: number; advancedTableIds: string[]; restaurantClosingReached: boolean; sleepDeprivationStarted: boolean; sleepDeprivationCollapseReached: boolean } {
     const elapsed = Math.max(0, now - this.lastRealtimeAt);
     this.lastRealtimeAt = now;
     const worldMinutesPerRealSecond = insideCasino
       ? WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO
       : WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO;
-    const elapsedWorldMinutes = worldTimePaused ? 0 : elapsed / 1000 * worldMinutesPerRealSecond;
+    const requestedWorldMinutes = worldTimePaused ? 0 : elapsed / 1000 * worldMinutesPerRealSecond;
+    const wasSleepDeprived = this.sleepDebtWorldMinutes >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES;
+    const closeInMinutes = this.restaurant.open ? this.restaurant.closeAtWorldMinute - this.worldMinutes : Number.POSITIVE_INFINITY;
+    const crossesRestaurantClose = requestedWorldMinutes > 0 && closeInMinutes >= 0 && closeInMinutes <= requestedWorldMinutes;
+    const restaurantPromptInMinutes = pauseAtRestaurantClose && crossesRestaurantClose ? closeInMinutes : Number.POSITIVE_INFINITY;
+    const sleepDebtThresholdInMinutes = this.sleepDebtWorldMinutes >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES
+      ? Number.POSITIVE_INFINITY
+      : this.nextSleepDebtAtWorldMinute - this.worldMinutes + Math.max(0, Math.ceil((SLEEP_DEBT_THRESHOLD_WORLD_MINUTES - this.sleepDebtWorldMinutes) / SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES) - 1) * 1440;
+    const reachesSleepDebtThreshold = requestedWorldMinutes > 0
+      && sleepDebtThresholdInMinutes >= 0
+      && sleepDebtThresholdInMinutes <= Math.min(requestedWorldMinutes, restaurantPromptInMinutes);
+    const sleepDeprivationNoticeInMinutes = reachesSleepDebtThreshold ? sleepDebtThresholdInMinutes : Number.POSITIVE_INFINITY;
+    if (reachesSleepDebtThreshold) {
+      const thresholdAt = this.worldMinutes + sleepDebtThresholdInMinutes;
+      this.sleepDeprivationCollapseAtWorldMinute = nextSleepDeprivationCheckAt(thresholdAt);
+    }
+    const collapseInMinutes = this.sleepDeprivationCollapseAtWorldMinute === null
+      ? Number.POSITIVE_INFINITY
+      : this.sleepDeprivationCollapseAtWorldMinute - this.worldMinutes;
+    const crossesSleepDeprivationCollapse = requestedWorldMinutes > 0 && collapseInMinutes >= 0 && collapseInMinutes <= requestedWorldMinutes;
+    const collapsePromptInMinutes = crossesSleepDeprivationCollapse ? collapseInMinutes : Number.POSITIVE_INFINITY;
+    const elapsedWorldMinutes = Math.min(requestedWorldMinutes, restaurantPromptInMinutes, sleepDeprivationNoticeInMinutes, collapsePromptInMinutes);
+    const restaurantClosingReached = restaurantPromptInMinutes === elapsedWorldMinutes && restaurantPromptInMinutes < collapsePromptInMinutes;
+    const sleepDeprivationCollapseReached = collapsePromptInMinutes === elapsedWorldMinutes;
+    const restaurantOperatingMinutes = !insideCasino && this.restaurant.open
+      ? Math.min(elapsedWorldMinutes, Math.max(0, closeInMinutes))
+      : 0;
     this.worldMinutes += elapsedWorldMinutes;
+    const crossedMidnights = this.worldMinutes >= this.nextSleepDebtAtWorldMinute
+      ? Math.floor((this.worldMinutes - this.nextSleepDebtAtWorldMinute) / 1440) + 1
+      : 0;
+    if (crossedMidnights > 0) {
+      this.sleepDebtWorldMinutes += crossedMidnights * SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES;
+      this.nextSleepDebtAtWorldMinute += crossedMidnights * 1440;
+    }
+    const sleepDeprivationStarted = reachesSleepDebtThreshold || (!wasSleepDeprived && this.sleepDebtWorldMinutes >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES);
     let income = 0;
     let tablesAdvanced = 0;
     const advancedTableIds: string[] = [];
 
-    if (!this.restaurant.pawned && !insideCasino) {
-      this.restaurant.cycleElapsedWorldMinutes += elapsedWorldMinutes;
+    if (!this.restaurant.pawned && restaurantOperatingMinutes > 0) {
+      this.restaurant.cycleElapsedWorldMinutes += restaurantOperatingMinutes;
       while (this.restaurant.cycleElapsedWorldMinutes >= RESTAURANT_CYCLE_WORLD_MINUTES) {
         this.restaurant.cycleElapsedWorldMinutes -= RESTAURANT_CYCLE_WORLD_MINUTES;
         const payout = restaurantLevels[this.restaurant.level - 1]!.income;
@@ -604,6 +654,7 @@ export class Game {
         income += payout;
       }
     }
+    if (crossesRestaurantClose && !restaurantClosingReached && closeInMinutes <= elapsedWorldMinutes) this.closeRestaurant();
 
     for (const table of this.tables.values()) {
       if (table.id === pausedTableId) continue;
@@ -615,7 +666,98 @@ export class Game {
         if (!advancedTableIds.includes(table.id)) advancedTableIds.push(table.id);
       }
     }
-    return { income, tablesAdvanced, advancedTableIds };
+    return { income, tablesAdvanced, advancedTableIds, restaurantClosingReached, sleepDeprivationStarted, sleepDeprivationCollapseReached };
+  }
+
+  closeRestaurant(): void {
+    this.restaurant.open = false;
+  }
+
+  continueRestaurantThroughNextClose(): boolean {
+    if (this.restaurant.pawned) return false;
+    this.restaurant.open = true;
+    while (this.restaurant.closeAtWorldMinute <= this.worldMinutes) this.restaurant.closeAtWorldMinute += 1440;
+    return true;
+  }
+
+  canOpenRestaurantNow(): boolean {
+    const { hour } = this.worldTimeInfo();
+    return !this.restaurant.pawned && !this.restaurant.open && hour >= 8 && hour < 20;
+  }
+
+  openRestaurant(): boolean {
+    if (!this.canOpenRestaurantNow()) return false;
+    const dayStart = Math.floor(this.worldMinutes / 1440) * 1440;
+    this.restaurant.open = true;
+    this.restaurant.closeAtWorldMinute = dayStart + RESTAURANT_CLOSING_MINUTE;
+    return true;
+  }
+
+  canRestAtHome(): boolean {
+    return true;
+  }
+
+  restUntilNextOpening(): { day: number; hour: number; minute: number } {
+    const dayStart = Math.floor(this.worldMinutes / 1440) * 1440;
+    const nextOpening = dayStart + 1440 + RESTAURANT_OPENING_MINUTE;
+    return this.finishRest(nextOpening);
+  }
+
+  restUntilNaturalWake(): { day: number; hour: number; minute: number } {
+    if (!this.canRestUntilNaturalWake()) {
+      this.lastSleepDurationWorldMinutes = 0;
+      return this.worldTimeInfo();
+    }
+    let wakeAt = this.worldMinutes;
+    let remainingDebt = this.sleepDebtWorldMinutes;
+    while (remainingDebt > 0) {
+      const nextMidnight = Math.floor(wakeAt / 1440) * 1440 + 1440;
+      const minutesUntilMidnight = nextMidnight - wakeAt;
+      if (remainingDebt < minutesUntilMidnight) {
+        wakeAt += remainingDebt;
+        remainingDebt = 0;
+        break;
+      }
+      remainingDebt -= minutesUntilMidnight;
+      wakeAt = nextMidnight;
+      remainingDebt += SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES;
+    }
+    return this.finishRest(wakeAt);
+  }
+
+  canRestUntilNaturalWake(): boolean {
+    return this.sleepDebtWorldMinutes >= MINIMUM_NATURAL_WAKE_DEBT_WORLD_MINUTES;
+  }
+
+  private finishRest(wakeAt: number): { day: number; hour: number; minute: number } {
+    const restStartedAt = this.worldMinutes;
+    let remainingDebt = this.sleepDebtWorldMinutes;
+    let cursor = restStartedAt;
+    while (cursor < wakeAt) {
+      const nextMidnight = Math.floor(cursor / 1440) * 1440 + 1440;
+      const segmentEnd = Math.min(wakeAt, nextMidnight);
+      remainingDebt = Math.max(0, remainingDebt - (segmentEnd - cursor));
+      cursor = segmentEnd;
+      if (cursor === nextMidnight) remainingDebt += SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES;
+    }
+    this.closeRestaurant();
+    this.worldMinutes = wakeAt;
+    this.lastSleepDurationWorldMinutes = wakeAt - restStartedAt;
+    this.sleepDebtWorldMinutes = remainingDebt;
+    this.nextSleepDebtAtWorldMinute = Math.floor(wakeAt / 1440) * 1440 + 1440;
+    this.sleepDeprivationCollapseAtWorldMinute = remainingDebt >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES
+      ? nextSleepDeprivationCheckAt(wakeAt)
+      : null;
+    this.lastRealtimeAt = Date.now();
+    return this.worldTimeInfo();
+  }
+
+  isSleepDeprived(): boolean {
+    return this.sleepDebtWorldMinutes >= SLEEP_DEBT_THRESHOLD_WORLD_MINUTES;
+  }
+
+  recoverFromSleepDeprivation(): { day: number; hour: number; minute: number } {
+    return this.restUntilNaturalWake();
   }
 
   upgradeRestaurant(): boolean {
@@ -631,6 +773,7 @@ export class Game {
     if (this.restaurant.pawned) return 0;
     const value = restaurantLevels[this.restaurant.level - 1]!.pawn;
     this.restaurant.pawned = true;
+    this.closeRestaurant();
     this.cash += value;
     return value;
   }

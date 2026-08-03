@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { Game, LOBBY_ROUND_MS, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps } from "./game";
+import { Game, LOBBY_ROUND_MS, RESTAURANT_CLOSING_MINUTE, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps } from "./game";
 import { confidenceRoadStartColumn, type RoundResult } from "./domain";
 
 const historyRound = (outcome: RoundResult["outcome"], id: number): RoundResult => ({
@@ -86,6 +86,152 @@ describe("real-time simulation", () => {
     expect(game.worldMinutes).toBe(18 * 60);
     expect(game.restaurant.cycleElapsedWorldMinutes).toBe(0);
     expect(runningTable.round).toBeGreaterThan(runningRound);
+    vi.restoreAllMocks();
+  });
+
+  it("stops exactly at closing time when the player is in the restaurant", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    const before = game.cash;
+    const tick = game.tickRealtime(3_000, null, false, false, true);
+
+    expect(game.worldMinutes).toBe(RESTAURANT_CLOSING_MINUTE);
+    expect(game.cash).toBe(before + game.restaurantInfo().income * 2);
+    expect(game.restaurant.open).toBe(true);
+    expect(tick.restaurantClosingReached).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it("accumulates eight hours of sleep debt at each midnight", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.tickRealtime(3_000, null, false, false, true);
+    expect(game.continueRestaurantThroughNextClose()).toBe(true);
+
+    const morning = game.tickRealtime(27_000, null, false, false, true);
+    expect(game.worldTimeInfo()).toEqual({ day: 2, hour: 20, minute: 0 });
+    expect(morning.sleepDeprivationStarted).toBe(false);
+    expect(morning.sleepDeprivationCollapseReached).toBe(false);
+    expect(game.sleepDebtWorldMinutes).toBe(8 * 60);
+    expect(morning.restaurantClosingReached).toBe(true);
+
+    game.continueRestaurantThroughNextClose();
+    const secondMidnight = game.tickRealtime(31_000, null, false, false, true);
+    expect(game.worldTimeInfo()).toEqual({ day: 3, hour: 0, minute: 0 });
+    expect(secondMidnight.sleepDeprivationStarted).toBe(true);
+    expect(game.sleepDebtWorldMinutes).toBe(16 * 60);
+    vi.restoreAllMocks();
+  });
+
+  it("automatically closes when closing time passes away from the restaurant", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    const before = game.cash;
+    game.tickRealtime(4_000, null, false);
+
+    expect(game.worldTimeInfo()).toEqual({ day: 1, hour: 21, minute: 0 });
+    expect(game.cash).toBe(before + game.restaurantInfo().income * 2);
+    expect(game.restaurant.open).toBe(false);
+    vi.restoreAllMocks();
+  });
+
+  it("reopens a closed restaurant until the next closing time", () => {
+    const game = new Game();
+    game.worldMinutes = 21 * 60;
+    game.closeRestaurant();
+
+    expect(game.continueRestaurantThroughNextClose()).toBe(true);
+    expect(game.restaurant.open).toBe(true);
+    expect(game.restaurant.closeAtWorldMinute).toBe(1440 + RESTAURANT_CLOSING_MINUTE);
+  });
+
+  it("rests until the next 08:00 and can open for the new day", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.tickRealtime(3_000, null, false);
+    expect(game.restaurant.open).toBe(false);
+
+    expect(game.restUntilNextOpening()).toEqual({ day: 2, hour: 8, minute: 0 });
+    expect(game.openRestaurant()).toBe(true);
+    expect(game.restaurant.closeAtWorldMinute).toBe(1440 + RESTAURANT_CLOSING_MINUTE);
+    vi.restoreAllMocks();
+  });
+
+  it("allows rest at any time and jumps to the following day 08:00", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.worldMinutes = 6 * 60;
+
+    expect(game.restUntilNextOpening()).toEqual({ day: 2, hour: 8, minute: 0 });
+    expect(game.lastSleepDurationWorldMinutes).toBe(26 * 60);
+    expect(game.isSleepDeprived()).toBe(false);
+    vi.restoreAllMocks();
+  });
+
+  it("counts a new midnight debt while sleeping to natural wake", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.worldMinutes = 18 * 60;
+    game.sleepDebtWorldMinutes = 8 * 60;
+    game.nextSleepDebtAtWorldMinute = 1440;
+
+    expect(game.restUntilNaturalWake()).toEqual({ day: 2, hour: 10, minute: 0 });
+    expect(game.lastSleepDurationWorldMinutes).toBe(16 * 60);
+    expect(game.sleepDebtWorldMinutes).toBe(0);
+    vi.restoreAllMocks();
+  });
+
+  it("does not start natural wake with less than one hour of debt", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.worldMinutes = 22 * 60;
+    game.sleepDebtWorldMinutes = 0;
+    game.restaurant.open = true;
+
+    expect(game.canRestUntilNaturalWake()).toBe(false);
+    expect(game.restUntilNaturalWake()).toEqual({ day: 1, hour: 22, minute: 0 });
+    expect(game.lastSleepDurationWorldMinutes).toBe(0);
+    expect(game.restaurant.open).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it("keeps uncleared debt after sleeping only until 08:00", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.worldMinutes = 18 * 60;
+    game.sleepDebtWorldMinutes = 8 * 60;
+    game.nextSleepDebtAtWorldMinute = 1440;
+
+    expect(game.restUntilNextOpening()).toEqual({ day: 2, hour: 8, minute: 0 });
+    expect(game.sleepDebtWorldMinutes).toBe(2 * 60);
+    vi.restoreAllMocks();
+  });
+
+  it("triggers collapse at 08:00 on the same day sleep deprivation starts", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.sleepDebtWorldMinutes = 2 * 60;
+
+    const deprivation = game.tickRealtime(7_000, null, false);
+    expect(game.worldTimeInfo()).toEqual({ day: 2, hour: 0, minute: 0 });
+    expect(deprivation.sleepDeprivationStarted).toBe(true);
+    expect(game.sleepDeprivationCollapseAtWorldMinute).toBe(1440 + 8 * 60);
+
+    const collapse = game.tickRealtime(15_000, null, false);
+    expect(game.worldTimeInfo()).toEqual({ day: 2, hour: 8, minute: 0 });
+    expect(collapse.sleepDeprivationCollapseReached).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it("recovers from a collapse at home until the following 08:00", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    game.worldMinutes = 1440 + 15 * 60;
+    game.sleepDebtWorldMinutes = 10 * 60;
+    game.sleepDeprivationCollapseAtWorldMinute = game.worldMinutes;
+
+    expect(game.recoverFromSleepDeprivation()).toEqual({ day: 3, hour: 9, minute: 0 });
+    expect(game.isSleepDeprived()).toBe(false);
     vi.restoreAllMocks();
   });
 });

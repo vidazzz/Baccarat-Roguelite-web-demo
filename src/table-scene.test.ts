@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, SQUEEZE_COMPLETE_PROGRESS, divineMashRetreatRatioPerMs, snapSqueezeDirection, tableCardPositions } from "./table-scene";
+import { composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, SQUEEZE_COMPLETE_PROGRESS, divineMashRetreatRatioPerMs, settlementChipPositions, snapSqueezeDirection, tableCardPositions } from "./table-scene";
 
 describe("squeeze direction snapping", () => {
   it("snaps the player-facing long edge, lower-left corner and short edge", () => {
@@ -64,5 +64,27 @@ describe("squeeze direction snapping", () => {
     expect(owned.resting.z).toBeGreaterThan(owned.table.z);
     expect(owned.resting.x).toBeCloseTo(0.75);
     expect(dealer.resting).toEqual(dealer.table);
+  });
+
+  it("moves settlement chips between the dealer and each wager position", () => {
+    const player = settlementChipPositions("player");
+    const banker = settlementChipPositions("banker");
+    const tie = settlementChipPositions("tie");
+    expect(player.dealer).toEqual(banker.dealer);
+    expect(player.wager.x).toBe(-banker.wager.x);
+    expect(tie.wager.x).toBe(0);
+    expect(player.wager.z).toBeGreaterThan(player.dealer.z);
+    expect(player.returned.z).toBeGreaterThan(player.wager.z);
+  });
+
+  it("decomposes payouts into exact casino chip values and preserves commission remainders", () => {
+    const denominations = [100, 200, 500, 1_000, 2_000];
+    expect(composeChipAmount(2_800, denominations)).toEqual([
+      { value: 2_000, colorIndex: 4 },
+      { value: 500, colorIndex: 2 },
+      { value: 200, colorIndex: 1 },
+      { value: 100, colorIndex: 0 },
+    ]);
+    expect(composeChipAmount(95, denominations)).toEqual([{ value: 95, colorIndex: 5 }]);
   });
 });

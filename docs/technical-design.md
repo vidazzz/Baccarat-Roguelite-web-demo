@@ -14,13 +14,13 @@ MVP 的技术目标是快速、可重复地验证核心玩法，并优先保证 
 | 构建工具 | Vite | 启动快、热更新快，适合原型迭代 |
 | 2D 界面 | HTML + CSS | 适合高密度路单、牌桌选择和经营界面 |
 | 3D 搓牌 | Three.js | 直接控制网格、材质、镜头和指针交互 |
-| 动画 | GSAP | 管理发牌、镜头和揭牌过渡；可按需引入 |
-| 音频 | Web Audio 或 Howler.js | 搓牌摩擦、筹码和结算反馈 |
-| 状态管理 | Zustand 或轻量自研 Store | 保持界面与游戏逻辑解耦 |
+| 动画 | 原生 `requestAnimationFrame`、CSS Transition | 管理发牌、镜头、揭牌和昼夜淡入淡出；避免额外运行时依赖 |
+| 音频 | 暂无外部音频依赖 | 当前 MVP 先验证视觉、输入和规则反馈 |
+| 状态管理 | `Game` 领域状态 + `main.ts` 流程状态 | 当前单机规模足够，保持界面与规则边界清晰 |
 | 单元测试 | Vitest | 验证百家乐规则、路单、概率和经济系统 |
-| 端到端测试 | Playwright | 验证选赌场、选桌、下注、搓牌和结算流程 |
+| 端到端测试 | 浏览器手测 / 可按需接入 Playwright | 验证选赌场、选桌、下注、搓牌和结算流程 |
 
-若项目后续采用 React，可由 React 负责 2D 界面。Three.js 搓牌场景仍建议直接封装，避免把高频网格更新放入 UI 渲染生命周期。MVP 不需要 React Three Fiber。
+当前实现不引入 React；2D 界面由模板字符串和 DOM 事件驱动，Three.js 搓牌场景直接封装在 `TableScene` 中，避免把高频网格更新放入 UI 渲染生命周期。
 
 ## 3. 总体架构
 
@@ -65,23 +65,30 @@ UI 层
 
 ## 4. 页面与运行状态
 
-建议页面状态：
+当前页面状态：
 
 ```text
-HOME / RESTAURANT
+MAP
+RESTAURANT
+SKILLS
 CASINO_SELECT
-CASINO_LOBBY
-TABLE_BETTING
-TABLE_DEALING
-TABLE_SQUEEZE
-TABLE_RESULT
+LOBBY
+TABLE
+DEALING
 GAME_OVER
 ```
+
+`MAP` 是首屏和地点切换入口；`RESTAURANT`、`CASINO_SELECT / LOBBY / TABLE / DEALING` 和 `SKILLS` 是功能场景。`activeActivity` 与当前视图分开保存：返回地图只改变视图，只有从地图进入另一地点才改变实际活动和时间规则。
 
 牌桌内部使用显式状态机：
 
 ```text
-BETTING -> LOCKED -> RESOLVING -> DEALING -> SQUEEZING -> RESULT -> BETTING
+TABLE(BETTING)
+  -> DEALING(animating / drawing-card)
+  -> DEALING(awaiting-card / dealer-revealing)
+  -> DEALING(settling-chips)
+  -> DEALING(settled)
+  -> TABLE(BETTING)
 ```
 
 状态转换必须由领域事件驱动，避免由动画回调直接修改资金或开奖结果。动画完成后只发送“表现已完成”事件，由状态机决定下一步。
@@ -184,11 +191,18 @@ interface Bet {
 
 interface RestaurantState {
   level: number;
-  investedCapital: number;
-  incomePerCycle: number;
-  roundsUntilIncome: number;
-  pawnValue: number;
-  status: "operating" | "pawned";
+  cycleElapsedWorldMinutes: number;
+  pawned: boolean;
+  open: boolean;
+  closeAtWorldMinute: number;
+}
+
+interface WorldScheduleState {
+  worldMinutes: number;
+  sleepDebtWorldMinutes: number; // 仅内部使用，不直接显示给玩家
+  nextSleepDebtAtWorldMinute: number;
+  sleepDeprivationCollapseAtWorldMinute: number | null;
+  lastSleepDurationWorldMinutes: number;
 }
 ```
 
@@ -229,8 +243,9 @@ interface RestaurantState {
   -> 生成符合目标结果与百家乐规则的有效牌序
   -> 按发牌阶段逐张揭示
   -> 阶段最后一张牌检查信心与神助
-  -> 小游戏选择低档或高档预测命中率
-  -> 在合法候选牌值中改写当前暗牌
+  -> 第一阶段选择牌型并从短边连点挤牌
+  -> 必要时第二阶段选择吸/吹并从长边连点挤牌
+  -> 在不改变补牌结构的合法候选中改写当前暗牌
   -> 重新计算结果并继续揭示
 ```
 
@@ -250,7 +265,7 @@ interface RestaurantState {
 
 ```text
 confidence = clamp(
-  70%
+  0%
   + floor(下注额 / 封盘前流动现金 / 10%) * 5%
   + 同向标记路数数 * 5%
   + Σ max(0, 同向标记路数长度 - 1) * 2%
@@ -269,8 +284,10 @@ confidence = clamp(
 - 反向惩罚读取当前完整历史中的全部有效路数，不受标记影响。
 - 每份路书的识别结果必须先经过唯一分类：路书专属型优先，其次依次为长路、单跳、逢某方连/不连、不长过 N 口；同一路书最多返回一个 `ConfidenceRoadPattern`。不同路书之间按 `source + id` 去重并允许叠加。
 - 标记状态与识别结果分开存储。正常 UI 的点击反馈只确认标记已记录，不得根据识别成功或失败改变颜色、文案或动画；当前测试构建可以保留带 `DEBUG` 前缀的识别详情。
-- 信心仅传给神助触发抽样，不得传入神助低档/高档概率计算或结果改写强度。
+- 信心仅传给神助触发抽样，不得传入神助两阶段命中率或结果改写强度。
 - 下注占比使用封盘扣款前的流动现金，暂不包含餐厅估值；每日盈利按已结算赌局净收益记录。
+- 调试滑块只修改基础信心，100% 锁定为独立开关；信心只进入 `shouldTriggerDivineAssist()`，不得修改两阶段各自的固定命中率。
+- 创造路数保存为每桌独立的庄闲序列。任一路书上的合法下一格操作都要投影为同一庄闲结果并同步渲染到其余路书；修改序列中的较早位置必须截断后续项。结算只消费首个预测，首项失败时清空整段并立即扣除信心。
 
 ### 8.4 牌序生成策略
 
@@ -301,7 +318,7 @@ interface RoadCell {
 
 UI 只根据格位数据绘制圆点、颜色和附加标记。大厅压缩版与牌桌完整版共享同一份路单结果，仅使用不同尺寸和裁剪范围。
 
-牌桌完整版按固定三区组织：珠盘路占左侧全高，大路位于中间上半区，大眼仔路、小路与曱甴路并排位于中间下半区，统计和问路占右侧全高。图标由 CSS 根据路型绘制，大眼仔路为空心圆、小路为实心圆、曱甴路为斜杠；问路预测复用同一套形状。大路和局保留在上一枚庄或闲格位的 `ties` 字段中，渲染为绿色斜杠，`ties > 1` 时额外显示次数。
+牌桌完整版把珠盘路、大路、大眼仔路、小路与曱甴路分区排列，并保留牌局统计；问路栏当前不渲染。图标由 CSS 根据路型绘制，大眼仔路为空心圆、小路为实心圆、曱甴路为斜杠。大路和局保留在上一枚庄或闲格位的 `ties` 字段中，渲染为绿色斜杠，`ties > 1` 时额外显示次数。赌场大厅每张牌桌独占一行，复用同一套路纸生成与渲染函数，只缩小格子尺寸和可见列数。
 
 ### 9.2 渲染技术
 
@@ -392,7 +409,15 @@ MVP 不制作完整赌场空间、荷官模型或真实手部动画。
 
 需要同时支持 Pointer Events，以便未来扩展触控，但 MVP 以鼠标体验为验收基准。
 
-### 10.4 性能目标
+### 10.4 3D 筹码与结算移交
+
+- 确认下注时保存每枚筹码的 `value` 和 `colorIndex`，发牌场景建立后在下注方对应位置重建筹码堆。
+- 筹码圆柱体颜色和顶部贴图必须与下注托盘面额对应；赔付金额使用当前赌场面额从大到小精确拆分，庄家抽水产生的余数可使用独立余数筹码表示。
+- 赢局保留原下注筹码，并把赔付筹码从荷官侧移动到下注位置；输局把原筹码从下注位置收回荷官侧；和局把原筹码退到玩家侧。
+- `SETTLING_CHIPS` 是独立表现阶段，移交完成回调只推进流程状态，不重复修改资金。资金仍由 `Game.settle()`唯一结算。
+- `TableScene.dispose()` 必须释放筹码几何体、材质、动态 Canvas 纹理和动画引用。
+
+### 10.5 性能目标
 
 - 桌面目标帧率：60 FPS；
 - 指针移动到画面反馈尽量控制在一帧内；
@@ -420,16 +445,28 @@ interface RestaurantLevelConfig {
 - 游戏日按 24 小时循环，时钟跨过 24:00 时递增天数；
 - 牌桌大厅轮次、动画和小游戏继续使用现实毫秒，不读取世界时间；
 - 牌桌进入玩家输入或确认状态时，将世界时间增量设为零；现实毫秒循环和其他桌的即时结算继续运行；
-- 世界时间用于日程系统；餐厅只在玩家位于赌场外时累计经营周期。
+- 自宅、已打烊餐厅、日程弹窗、休息过渡和玩家确认状态都把世界时间增量设为零；
+- `activeActivity` 与视图状态分离，地图视图继承玩家离开前地点的时间规则；
+- `tickRealtime()`在一个现实帧可能跨过关键时点时，只推进到最近事件边界并返回 `restaurantClosingReached`、`sleepDeprivationStarted` 或 `sleepDeprivationCollapseReached`，由 UI 显示反馈后再继续。
 
 单机实时循环每累计 60 游戏分钟餐厅经营时间后：
 
-- 若餐厅为 `operating`，发放当前等级收益；
-- 若餐厅为 `pawned`，不发放收益；
-- 若玩家已经进入赌场大厅或牌桌，冻结餐厅周期进度且不发放收益；
-- 发放过程生成独立交易记录，避免直接静默修改余额。
+- 只有 `restaurant.open && !restaurant.pawned && !insideCasino` 的分钟数计入经营周期；
+- 正常营业窗口为 08:00 至 20:00。玩家身处餐厅时，时钟在 `closeAtWorldMinute` 精确暂停并弹出打烊选择；身处其他活动时自动关闭；
+- 继续营业把 `open` 设为 `true`，并把 `closeAtWorldMinute`推进到最近的下一次 20:00；打烊状态进入餐厅后保持暂停，直到继续营业或切换地点；
+- 进入赌场、餐厅打烊或典当时冻结已有周期余量，不重复发放收益。
 
-所有资金变化建议统一通过账本接口：
+疲劳在领域层以世界分钟为单位记录，但玩家界面只显示模糊困倦文案：
+
+- 每跨过 00:00，`sleepDebtWorldMinutes += 480`；休息按每分钟一比一扣减，并允许跨多个午夜继续计算；
+- `restUntilNaturalWake()`在内部量低于 60 分钟时拒绝执行，否则计算包含途中新增量的最早清零时刻；
+- `restUntilNextOpening()`固定跳到下一日 08:00，保留未清除部分；
+- 内部量达到 600 分钟时安排状态获得后最近的 08:00检查。若玩家未在休息，返回晕倒事件并由 UI 强制调用自然醒恢复；
+- `lastSleepDurationWorldMinutes`用于醒来提示，玩家文案不得出现内部变量名称或“睡眠债务”术语。
+
+地图和自宅昼夜资源各自同时预载两张同尺寸图片。容器以 `daylight/night` 类切换透明度，CSS 使用 1.5 秒交叉渐变；当前昼间边界为 06:00 至 18:00。
+
+当前资金直接由 `Game` 修改。若后续增加存档和复杂经济事件，建议统一迁移到以下账本接口：
 
 ```ts
 interface LedgerEntry {
@@ -442,7 +479,7 @@ interface LedgerEntry {
 }
 ```
 
-统一账本便于排查重复结算、负余额和经济参数问题。
+统一账本将便于排查重复结算、负余额和经济参数问题。
 
 ## 12. 配置与调试工具
 
@@ -454,6 +491,8 @@ interface LedgerEntry {
 - 路数识别阈值、长度规则和信心修正值；
 - 概率上下界；
 - 餐厅升级成本、周期收益和典当价格；
+- 餐厅营业时间、午夜疲劳增量、自然醒最低门槛和晕倒阈值；
+- 昼夜边界和背景交叉渐变时长；
 - 初始资金和赔率。
 
 调试面板至少提供：
@@ -465,6 +504,7 @@ interface LedgerEntry {
 - 已冻结的目标结果和具体牌序；
 - 暂停、倍速和立即推进牌局；
 - 修改现金、餐厅等级和技能等级；
+- 调整基础信心，并独立锁定 100% 信心；
 - 导出最近若干局调试日志。
 
 生产构建应能关闭调试入口。
@@ -485,7 +525,9 @@ interface LedgerEntry {
 - 多修正器应用、归一化和上下界；
 - 固定种子结果复现；
 - 下注上下限、余额不足和重复结算；
-- 餐厅升级、周期收益、典当和 Game Over。
+- 3D 筹码面额拆分、下注位置和输赢移交方向；
+- 餐厅升级、周期收益、打烊、继续营业、典当和 Game Over；
+- 午夜疲劳累积、跨午夜自然醒、固定睡到 08:00、睡眠不足和当天 08:00晕倒边界。
 
 ### 13.2 统计测试
 
@@ -509,7 +551,9 @@ interface LedgerEntry {
 4. 路书标记在封盘前不预览信心，封盘后分项反馈与结算一致。
 5. 搓牌回弹、越阈值揭牌和快速开牌。
 6. 餐厅升级、周期发放和典当确认。
-7. 资产完全耗尽后进入 Game Over。
+7. 餐厅打烊后暂停、继续营业至下次打烊、自宅两种休息和强制晕倒恢复。
+8. 地图与自宅昼夜图片在 06:00/18:00 边界平滑切换。
+9. 资产完全耗尽后进入 Game Over。
 
 ## 14. 实施顺序
 

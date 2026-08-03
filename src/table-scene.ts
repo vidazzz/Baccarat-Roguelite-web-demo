@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { cardFaceAsset } from "./card-assets";
-import { type Card, type Side } from "./domain";
+import { type Card, type Outcome, type Side } from "./domain";
 
 export interface TableCard {
   card: Card;
@@ -11,6 +11,45 @@ export interface TableCard {
 export interface TableCardPositions {
   table: { x: number; y: number; z: number };
   resting: { x: number; y: number; z: number };
+}
+
+export type ChipSettlementKind = "win" | "lose" | "push";
+
+export interface TableChip {
+  value: number;
+  colorIndex: number;
+}
+
+export interface SettlementChipPositions {
+  dealer: { x: number; y: number; z: number };
+  wager: { x: number; y: number; z: number };
+  returned: { x: number; y: number; z: number };
+}
+
+export function settlementChipPositions(side: Outcome): SettlementChipPositions {
+  const wagerX = side === "player" ? -2.45 : side === "banker" ? 2.45 : 0;
+  return {
+    dealer: { x: 0, y: 0.08, z: -3.18 },
+    wager: { x: wagerX, y: 0.08, z: 2.95 },
+    returned: { x: wagerX, y: 0.08, z: 3.72 },
+  };
+}
+
+export function composeChipAmount(amount: number, denominations: number[]): TableChip[] {
+  let remaining = Math.max(0, Math.floor(amount));
+  const sorted = denominations
+    .map((value, colorIndex) => ({ value, colorIndex }))
+    .filter((chip) => chip.value > 0)
+    .sort((a, b) => b.value - a.value);
+  const chips: TableChip[] = [];
+  for (const denomination of sorted) {
+    while (remaining >= denomination.value) {
+      chips.push(denomination);
+      remaining -= denomination.value;
+    }
+  }
+  if (remaining > 0) chips.push({ value: remaining, colorIndex: denominations.length });
+  return chips;
 }
 
 export function tableCardPositions(entry: Pick<TableCard, "side" | "handIndex">, ownedSide: Side | null): TableCardPositions {
@@ -92,6 +131,13 @@ interface SceneCard {
   revealTexture: THREE.CanvasTexture | null;
 }
 
+interface ChipMotion {
+  group: THREE.Group;
+  start: THREE.Vector3;
+  target: THREE.Vector3;
+  delay: number;
+}
+
 export class TableScene {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
@@ -128,6 +174,11 @@ export class TableScene {
   private onSqueezeProgress: (value: number) => void = () => undefined;
   private onSqueezeThreshold: (() => void) | null = null;
   private onSqueezeComplete: () => void = () => undefined;
+  private settlementChipGroups: THREE.Group[] = [];
+  private chipMotions: ChipMotion[] = [];
+  private chipTransferStartedAt = 0;
+  private chipTransferDone = false;
+  private onChipTransferComplete: () => void = () => undefined;
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
@@ -317,6 +368,36 @@ export class TableScene {
     };
   }
 
+  showWagerChips(side: Outcome, chips: TableChip[]): void {
+    this.clearSettlementChips();
+    const { wager } = settlementChipPositions(side);
+    const wagerPosition = new THREE.Vector3(wager.x, wager.y, wager.z);
+    this.createChipPile(wagerPosition, chips);
+  }
+
+  animateChipSettlement(kind: ChipSettlementKind, side: Outcome, wagerChips: TableChip[], payoutChips: TableChip[], onDone: () => void): void {
+    this.clearSettlementChips();
+    const positions = settlementChipPositions(side);
+    const dealer = new THREE.Vector3(positions.dealer.x, positions.dealer.y, positions.dealer.z);
+    const wager = new THREE.Vector3(positions.wager.x, positions.wager.y, positions.wager.z);
+    const returned = new THREE.Vector3(positions.returned.x, positions.returned.y, positions.returned.z);
+
+    if (kind === "win") {
+      this.createChipPile(wager, wagerChips);
+    }
+
+    const movingChips = kind === "win" ? payoutChips : wagerChips;
+    const start = (kind === "win" ? dealer : wager).clone();
+    const target = (kind === "lose" ? dealer : kind === "push" ? returned : wager).clone();
+    if (kind === "win") target.z -= 0.68;
+    const group = this.createChipPile(start, movingChips);
+    this.chipMotions.push({ group, start, target, delay: 0 });
+
+    this.onChipTransferComplete = onDone;
+    this.chipTransferDone = false;
+    this.chipTransferStartedAt = performance.now() + 220;
+  }
+
   revealByDealer(index: number, onDone: () => void): void {
     this.focus(index, () => this.revealFocusedByDealer(index, onDone));
   }
@@ -380,9 +461,96 @@ export class TableScene {
     this.renderer.domElement.removeEventListener("pointermove", this.pointerMove);
     this.renderer.domElement.removeEventListener("pointerup", this.pointerUp);
     this.renderer.domElement.removeEventListener("pointercancel", this.pointerUp);
+    this.clearSettlementChips();
     this.textures.forEach((texture) => texture.dispose());
     this.renderer.dispose();
     this.host.replaceChildren();
+  }
+
+  private createChipPile(position: THREE.Vector3, chips: TableChip[]): THREE.Group {
+    const group = new THREE.Group();
+    const grouped = new Map<string, TableChip[]>();
+    chips.forEach((chip) => {
+      const key = `${chip.colorIndex}:${chip.value}`;
+      const stack = grouped.get(key) ?? [];
+      stack.push(chip);
+      grouped.set(key, stack);
+    });
+    const stacks = [...grouped.values()];
+    stacks.forEach((stack, stackIndex) => {
+      const stackX = (stackIndex - (stacks.length - 1) / 2) * 0.68;
+      stack.forEach((chipInfo, chipIndex) => {
+        const color = this.chipColor(chipInfo.colorIndex);
+        const height = chipIndex * 0.09;
+        const chip = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.31, 0.31, 0.084, 32),
+          new THREE.MeshStandardMaterial({ color, roughness: 0.48, metalness: 0.08 }),
+        );
+        chip.position.set(stackX, height, 0);
+        chip.rotation.y = chipIndex * 0.14;
+        chip.castShadow = true;
+        group.add(chip);
+
+        const top = new THREE.Mesh(
+          new THREE.CircleGeometry(0.27, 32),
+          new THREE.MeshBasicMaterial({ map: this.chipFaceTexture(chipInfo), transparent: true }),
+        );
+        top.rotation.x = -Math.PI / 2;
+        top.position.set(stackX, height + 0.043, 0);
+        group.add(top);
+      });
+    });
+    group.position.copy(position);
+    this.scene.add(group);
+    this.settlementChipGroups.push(group);
+    return group;
+  }
+
+  private chipColor(colorIndex: number): number {
+    return [0x202522, 0xa5473f, 0xa9782f, 0x594482, 0x34807b, 0xd6d5cb][colorIndex] ?? 0x355f85;
+  }
+
+  private chipFaceTexture(chip: TableChip): THREE.CanvasTexture {
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext("2d")!;
+    const color = `#${this.chipColor(chip.colorIndex).toString(16).padStart(6, "0")}`;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(128, 128, 124, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#f2e2b9";
+    ctx.lineWidth = 13;
+    ctx.setLineDash([22, 12]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.arc(128, 128, 78, 0, Math.PI * 2);
+    ctx.stroke();
+    const label = chip.value >= 1_000 && chip.value % 1_000 === 0 ? `${chip.value / 1_000}K` : String(chip.value);
+    ctx.fillStyle = chip.colorIndex === 2 || chip.colorIndex === 5 ? "#20231f" : "#fff3cf";
+    ctx.font = `900 ${label.length >= 4 ? 48 : 58}px Arial, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, 128, 132);
+    return this.canvasTexture(canvas);
+  }
+
+  private clearSettlementChips(): void {
+    this.settlementChipGroups.forEach((group) => {
+      group.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        object.geometry.dispose();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        materials.forEach((material) => material.dispose());
+      });
+      this.scene.remove(group);
+    });
+    this.settlementChipGroups = [];
+    this.chipMotions = [];
+    this.chipTransferStartedAt = 0;
   }
 
   private createCard(entry: TableCard, revealed: boolean, ownedSide: Side | null): SceneCard {
@@ -915,6 +1083,24 @@ export class TableScene {
         const done = this.focusTarget.done;
         this.focusTarget = null;
         done();
+      }
+    }
+    if (this.chipTransferStartedAt) {
+      const elapsed = now - this.chipTransferStartedAt;
+      const duration = 980;
+      this.chipMotions.forEach((motion) => {
+        const progress = THREE.MathUtils.clamp((elapsed - motion.delay) / duration, 0, 1);
+        const eased = progress * progress * (3 - 2 * progress);
+        motion.group.position.lerpVectors(motion.start, motion.target, eased);
+        motion.group.position.y += Math.sin(progress * Math.PI) * 0.1;
+        motion.group.rotation.y = Math.sin(progress * Math.PI) * 0.12;
+      });
+      const finalDelay = Math.max(0, ...this.chipMotions.map((motion) => motion.delay));
+      if (!this.chipTransferDone && elapsed >= finalDelay + duration + 420) {
+        this.chipTransferDone = true;
+        this.chipTransferStartedAt = 0;
+        this.chipMotions.forEach((motion) => motion.group.position.copy(motion.target));
+        this.onChipTransferComplete();
       }
     }
     this.camera.lookAt(this.cameraLookAt);

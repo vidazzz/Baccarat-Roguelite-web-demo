@@ -1,16 +1,18 @@
 import "./style.css";
 import casinoAsset from "./casino.jpg";
 import homeAsset from "./home.jpg";
+import homeNightAsset from "./home_night.jpg";
 import mapAsset from "./map.jpg";
+import mapDaylightAsset from "./map_daylight.jpg";
 import restaurantAsset from "./restaurant.jpg";
 import { cardFaceAsset } from "./card-assets";
 import { cardLabel, cardValue, confidenceRoadStartColumn, forecastBaccaratReveal, makeBeadPlate, makeBigRoad, makeDerivedRoads, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type DerivedRoadColor, type Outcome, type RoadBook, type RoundResult, type Side } from "./domain";
 import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, RESTAURANT_CYCLE_WORLD_MINUTES, inlineWatchSteps, skillDefinitions, type Casino, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
-import { DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, divineMashRetreatRatioPerMs, TableScene } from "./table-scene";
+import { composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, divineMashRetreatRatioPerMs, TableScene, type TableChip } from "./table-scene";
 
 type View = "map" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
 type Activity = "restaurant" | "casino" | "home";
-type DealStage = "animating" | "drawing-card" | "awaiting-card" | "dealer-revealing" | "settled";
+type DealStage = "animating" | "drawing-card" | "awaiting-card" | "dealer-revealing" | "settling-chips" | "settled";
 
 const game = new Game();
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -19,6 +21,8 @@ let activeActivity: Activity = "restaurant";
 let casinoId = casinos[0]!.id;
 let tableId = "harbor-1";
 let stagedBetSide: Outcome | null = null;
+let stagedBetChips: TableChip[] = [];
+let roundWagerChips: TableChip[] = [];
 let selectedChip = 100;
 let betDraftNotice = "选择筹码后，点击下注区落注";
 let tableScene: TableScene | null = null;
@@ -39,6 +43,14 @@ let inlineWatchStep = 0;
 let inlineWatchSettled = false;
 let roadMarkFeedback: { message: string; debug: string } | null = null;
 let roadCreationFailure: RoadCreationResolution | null = null;
+let restaurantClosingPromptOpen = false;
+let sleepTransitionActive = false;
+let wakePromptOpen = false;
+let sleepCollapsePromptOpen = false;
+let sleepDeprivationNoticeOpen = false;
+let wakeAfterForcedRest = false;
+let homeSkillManagementOpen = false;
+let restChoiceOpen = false;
 
 const money = (value: number) => `¥${Math.floor(value).toLocaleString("zh-CN")}`;
 const outcomeName = (outcome: Outcome) => ({ banker: "庄", player: "闲", tie: "和" })[outcome];
@@ -120,13 +132,34 @@ function roadCreationTargets(table: GameTable, roadBook: RoadBook, visibleFrom: 
 function resetBetDraft(refund = true): void {
   if (refund) game.cancelReservedBet();
   stagedBetSide = null;
+  stagedBetChips = [];
   betDraftNotice = "选择筹码后，点击下注区落注";
 }
 const worldTimeLabel = () => {
   const { day, hour, minute } = game.worldTimeInfo();
   return `第 ${day} 日 ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 };
-const worldTimePaused = () => view === "table"
+const lastSleepDurationLabel = () => {
+  const totalMinutes = Math.max(0, Math.round(game.lastSleepDurationWorldMinutes));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0 && minutes > 0) return `${hours} 小时 ${minutes} 分钟`;
+  if (hours > 0) return `${hours} 小时`;
+  return `${minutes} 分钟`;
+};
+const worldIsDaylight = () => {
+  const { hour } = game.worldTimeInfo();
+  return hour >= 6 && hour < 18;
+};
+const worldTimePaused = () => activeActivity === "home"
+  || (activeActivity === "restaurant" && !game.restaurant.open && !game.restaurant.pawned)
+  || restaurantClosingPromptOpen
+  || sleepTransitionActive
+  || wakePromptOpen
+  || restChoiceOpen
+  || sleepDeprivationNoticeOpen
+  || sleepCollapsePromptOpen
+  || view === "table"
   || (view === "dealing" && (dealStage === "awaiting-card" || dealStage === "settled" || tablePlayerInteractionActive))
   || (debugMenuOpen && view === "dealing");
 
@@ -136,12 +169,75 @@ function shell(content: string): string {
   return `
     <header class="topbar">
       <button class="brand ${view === "map" ? "brand-map-hidden" : ""}" data-action="${backAction}" aria-label="${backLabel}">${backLabel}</button>
-      <div class="world-clock ${worldTimePaused() ? "paused" : ""}"><span>世界时间</span><strong data-world-clock>${worldTimeLabel()}</strong></div>
+      <div class="world-clock ${worldTimePaused() ? "paused" : ""} ${game.isSleepDeprived() ? "sleep-deprived" : ""}"><span>世界时间</span><strong data-world-clock>${worldTimeLabel()}</strong><em class="sleep-status" data-sleep-status ${game.isSleepDeprived() ? "" : "hidden"}>睡眠不足</em></div>
       <div class="confidence"><span>信心</span><strong>${Math.round(game.confidence * 100)}%</strong></div>
       <div class="wallet"><span>可用现金</span><strong>${money(game.cash)}</strong></div>
     </header>
     <main>${content}</main>
+    ${restaurantClosingPromptOpen ? restaurantClosingPrompt() : ""}
+    ${wakePromptOpen ? wakePrompt() : ""}
+    ${restChoiceOpen ? restChoicePrompt() : ""}
+    ${sleepDeprivationNoticeOpen ? sleepDeprivationNotice() : ""}
+    ${sleepCollapsePromptOpen ? sleepCollapsePrompt() : ""}
   `;
+}
+
+function restaurantClosingPrompt(): string {
+  return `<div class="schedule-modal restaurant-closing-modal" role="dialog" aria-modal="true" aria-labelledby="restaurant-closing-title">
+    <section>
+      <span>20:00 · 营业时间结束</span>
+      <h2 id="restaurant-closing-title">外港小馆打烊了</h2>
+      <p>今天的正常营业已经结束。现在收工回家，或继续营业到明天打烊。</p>
+      <div><button class="primary" data-action="close-restaurant">收工回家</button><button class="secondary" data-action="continue-restaurant">继续营业</button></div>
+    </section>
+  </div>`;
+}
+
+function wakePrompt(): string {
+  const sleepDeprived = game.isSleepDeprived();
+  const restResult = wakeAfterForcedRest ? "身体已经恢复。" : sleepDeprived ? "你还是没有睡够。" : "这一觉睡足了。";
+  return `<div class="schedule-modal wake-modal ${sleepDeprived ? "sleep-deprived" : ""}" role="dialog" aria-modal="true" aria-labelledby="wake-title">
+    <section>
+      <span>${wakeAfterForcedRest ? "强制休息结束" : sleepDeprived ? "休息结束 · 睡眠不足" : "休息结束"}</span>
+      <h2 id="wake-title">${worldTimeLabel()}</h2>
+      <p>本次休息了 ${lastSleepDurationLabel()}。${restResult}</p>
+      <div><button class="primary" data-action="open-restaurant-after-rest">开店</button><button class="secondary" data-action="cancel-wake">留在家里</button></div>
+    </section>
+  </div>`;
+}
+
+function sleepCollapsePrompt(): string {
+  return `<div class="schedule-modal sleep-collapse-modal" role="alertdialog" aria-modal="true" aria-labelledby="sleep-collapse-title">
+    <section>
+      <span>08:00 · 睡眠不足</span>
+      <h2 id="sleep-collapse-title">眼前突然一黑</h2>
+      <p>新的一天开始时你仍未休息，长期缺觉让你失去了意识。确认后将立即回家，一直睡到自然醒。</p>
+      <div><button class="primary" data-action="confirm-sleep-collapse">回家休息</button></div>
+    </section>
+  </div>`;
+}
+
+function sleepDeprivationNotice(): string {
+  return `<div class="schedule-modal sleep-deprivation-modal" role="alertdialog" aria-modal="true" aria-labelledby="sleep-deprivation-title">
+    <section>
+      <span>00:00 · 夜深了</span>
+      <h2 id="sleep-deprivation-title">你已经太久没睡够了</h2>
+      <p>身体已经接近极限。若今天 08:00 仍未休息，你会因体力不支而晕倒。</p>
+      <div><button class="primary" data-action="confirm-sleep-deprivation">确认</button></div>
+    </section>
+  </div>`;
+}
+
+function restChoicePrompt(): string {
+  const naturalWakeAllowed = game.canRestUntilNaturalWake();
+  const debt = game.sleepDebtWorldMinutes;
+  const sleepiness = debt < 60 ? "不太困" : debt < 4 * 60 ? "有点困" : debt < 8 * 60 ? "很困" : debt < 10 * 60 ? "困得厉害" : "快撑不住了";
+  return `<div class="schedule-modal rest-choice-modal" data-rest-choice-backdrop role="dialog" aria-modal="true" aria-label="休息方式">
+    <section>
+      <p class="rest-sleepiness">现在：${sleepiness}</p>
+      <div><button class="primary" data-action="rest-natural" ${naturalWakeAllowed ? "" : "disabled"}>睡到自然醒</button><button class="secondary" data-action="rest-next-opening">睡到明早 08:00</button></div>
+    </section>
+  </div>`;
 }
 
 function roadMarkOverlay(table: GameTable, roadBook: RoadBook, visibleFrom: number, columns: number): string {
@@ -204,25 +300,27 @@ function beadPlate(table: GameTable, interactive = false): string {
 
 function mapView(): string {
   const restaurant = game.restaurantInfo();
+  const daylight = worldIsDaylight();
   const activityName = ({ restaurant: "外港小馆", casino: "赌场", home: "自宅" } as const)[activeActivity];
   const locationClass = (activity: Activity) => activeActivity === activity ? "is-current" : "";
   const locationStatus = (activity: Activity, defaultLabel: string) => activeActivity === activity ? "<i class=\"map-current-tag\">当前所在</i>" : `<i>${defaultLabel}</i>`;
   return shell(`
     <section class="map-page">
-      <div class="map-world">
-        <img class="map-art" src="${mapAsset}" alt="澳门城市地图">
+      <div class="map-world ${daylight ? "daylight" : "night"}" data-map-world>
+        <img class="map-art map-art-daylight" src="${mapDaylightAsset}" alt="" aria-hidden="true">
+        <img class="map-art map-art-night" src="${mapAsset}" alt="" aria-hidden="true">
         <div class="map-atmosphere" aria-hidden="true"></div>
-        <div class="map-title"><span>城市总览</span><strong>选择目的地</strong><small>第 ${game.worldTimeInfo().day} 日 · ${worldTimeLabel().slice(5)}</small><em><b></b>当前位于 · ${activityName}</em></div>
+        <div class="map-title"><span>城市总览</span><strong>选择目的地</strong><small data-world-time-summary>${worldTimeLabel()}</small><em><b></b>当前位于 · ${activityName}</em></div>
         <button class="map-location map-location-casino ${locationClass("casino")}" data-action="casinos" aria-label="${activeActivity === "casino" ? "返回赌场" : "进入赌场"}">
           <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">♠</span><strong>赌场</strong><small>海湾娱乐城 · 金殿贵宾厅</small>${locationStatus("casino", "进入")}
         </button>
         <button class="map-location map-location-restaurant ${locationClass("restaurant")}" data-action="restaurant" aria-label="${activeActivity === "restaurant" ? "返回餐厅" : "进入餐厅"}">
-          <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">店</span><strong>外港小馆</strong><small>${game.restaurant.pawned ? "已典当 · 停止营业" : `${game.restaurant.level} 级 · 每小时 ${money(restaurant.income)}`}</small>${locationStatus("restaurant", "经营")}
+          <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">店</span><strong>外港小馆</strong><small>${game.restaurant.pawned ? "已典当 · 停止营业" : `${game.restaurant.open ? "营业中" : "已打烊"} · ${game.restaurant.level} 级 · 每小时 ${money(restaurant.income)}`}</small>${locationStatus("restaurant", game.restaurant.open ? "经营" : "打烊")}
         </button>
         <button class="map-location map-location-home ${locationClass("home")}" data-action="skills" aria-label="${activeActivity === "home" ? "返回自宅" : "进入自宅"}">
           <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">宅</span><strong>自宅</strong><small>技能管理 · 赌术构筑</small>${locationStatus("home", "进入")}
         </button>
-        <div class="map-footer"><span>地图上的选择才会切换当前活动</span><b>餐厅在赌场外持续经营</b></div>
+        <div class="map-footer"><span>地图上的选择才会切换当前活动</span><b>餐厅营业时间 08:00 - 20:00</b></div>
       </div>
       ${roadCreationResolutionView()}
     </section>
@@ -231,29 +329,37 @@ function mapView(): string {
 
 function skillsView(): string {
   const equipped = skillDefinitions.find((skill) => skill.id === game.equippedSkill);
+  const daylight = worldIsDaylight();
+  const skillManagement = homeSkillManagementOpen ? `<div class="home-skill-overlay" role="dialog" aria-modal="true" aria-labelledby="home-skill-title">
+    <section class="residence-skill-workspace">
+      <header class="home-skill-header"><div><span>书桌 · 赌术构筑</span><h2 id="home-skill-title">技能管理</h2><small>只有一个技能栏位</small></div><button class="home-skill-close" data-action="close-skill-management" aria-label="关闭技能管理">×</button></header>
+      <section class="equipped-skill-slot ${equipped ? "filled" : "empty"}">
+        <div><span>唯一技能栏位 · 1 SLOT</span><h2>${equipped ? equipped.name : "尚未装备技能"}</h2><p>${equipped ? `${equipped.description} 当前 Lv.${game.skills[equipped.id]}，等级保留但不参与本轮信心公式。` : "未装备技能也可以通过标记路书获得信心。"}</p></div>
+        ${equipped ? `<button class="secondary" data-action="unequip-skill">卸下技能</button>` : ""}
+      </section>
+      <div class="skill-grid">${skillDefinitions.map((skill) => {
+    const level = game.skills[skill.id];
+    const equippedNow = game.equippedSkill === skill.id;
+    const upgradeCost = game.skillUpgradeCost(skill.id);
+    return `<article class="skill-card ${equippedNow ? "equipped" : ""}">
+      <header><div><span>${skill.roadName}专精</span><h2>${skill.name}</h2></div><strong>Lv.${level}</strong></header>
+      <p>${skill.description}</p>
+      <dl><div><dt>当前作用</dt><dd>不直接修改信心</dd></div><div><dt>神助效果</dt><dd>不受技能等级影响</dd></div><div><dt>下一级</dt><dd>${level >= MAX_SKILL_LEVEL ? "已满级" : "保留成长"}</dd></div></dl>
+      <footer><button class="secondary" data-action="equip-skill" data-skill="${skill.id}" ${equippedNow ? "disabled" : ""}>${equippedNow ? "已装备" : "装配"}</button><button class="primary" data-action="upgrade-skill" data-skill="${skill.id}" ${upgradeCost === null || game.cash < upgradeCost ? "disabled" : ""}>${upgradeCost === null ? "已达最高等级" : `升级 · ${money(upgradeCost)}`}</button></footer>
+    </article>`;
+  }).join("")}</div>
+    </section>
+  </div>` : "";
   return shell(`
     <section class="residence-scene-page">
-      <div class="residence-scene">
-        <img class="residence-scene-art" src="${homeAsset}" alt="自宅室内场景">
+      <div class="residence-scene ${daylight ? "daylight" : "night"}">
+        <img class="residence-scene-art residence-scene-art-daylight" src="${homeAsset}" alt="" aria-hidden="true">
+        <img class="residence-scene-art residence-scene-art-night" src="${homeNightAsset}" alt="" aria-hidden="true">
         <div class="residence-scene-shade" aria-hidden="true"></div>
-        <div class="residence-scene-header"><p class="eyebrow">自宅 · 赌术构筑</p><h1>技能管理</h1><small>在自宅整理你的赌术，只有一个技能栏位。</small></div>
-        <section class="residence-skill-workspace">
-          <section class="equipped-skill-slot ${equipped ? "filled" : "empty"}">
-            <div><span>唯一技能栏位 · 1 SLOT</span><h2>${equipped ? equipped.name : "尚未装备技能"}</h2><p>${equipped ? `${equipped.description} 当前 Lv.${game.skills[equipped.id]}，等级保留但不参与本轮信心公式。` : "未装备技能也可以通过标记路书获得信心。"}</p></div>
-            ${equipped ? `<button class="secondary" data-action="unequip-skill">卸下技能</button>` : ""}
-          </section>
-          <div class="skill-grid">${skillDefinitions.map((skill) => {
-        const level = game.skills[skill.id];
-        const equippedNow = game.equippedSkill === skill.id;
-        const upgradeCost = game.skillUpgradeCost(skill.id);
-        return `<article class="skill-card ${equippedNow ? "equipped" : ""}">
-          <header><div><span>${skill.roadName}专精</span><h2>${skill.name}</h2></div><strong>Lv.${level}</strong></header>
-          <p>${skill.description}</p>
-          <dl><div><dt>当前作用</dt><dd>不直接修改信心</dd></div><div><dt>神助效果</dt><dd>不受技能等级影响</dd></div><div><dt>下一级</dt><dd>${level >= MAX_SKILL_LEVEL ? "已满级" : "保留成长"}</dd></div></dl>
-          <footer><button class="secondary" data-action="equip-skill" data-skill="${skill.id}" ${equippedNow ? "disabled" : ""}>${equippedNow ? "已装备" : "装配"}</button><button class="primary" data-action="upgrade-skill" data-skill="${skill.id}" ${upgradeCost === null || game.cash < upgradeCost ? "disabled" : ""}>${upgradeCost === null ? "已达最高等级" : `升级 · ${money(upgradeCost)}`}</button></footer>
-        </article>`;
-          }).join("")}</div>
-        </section>
+        <div class="residence-scene-header"><p class="eyebrow">自宅 · 我的房间</p><h1>今晚留在家里</h1><small>选择房间里的家具进行行动</small></div>
+        <button class="home-scene-hotspot home-hotspot-bed available" data-action="open-rest-options"><i aria-hidden="true"></i><span><b>休息</b><small>选择休息方式</small></span></button>
+        <button class="home-scene-hotspot home-hotspot-desk" data-action="open-skill-management"><i aria-hidden="true"></i><span><b>技能管理</b><small>装配与升级赌术</small></span></button>
+        ${skillManagement}
       </div>
     </section>
   `);
@@ -269,12 +375,12 @@ function restaurantView(): string {
       <div class="restaurant-scene">
         <img class="restaurant-scene-art" src="${restaurantAsset}" alt="外港小馆内部场景">
         <div class="restaurant-scene-shade" aria-hidden="true"></div>
-        <div class="restaurant-scene-header"><div><p class="eyebrow">稳定收入 · 外港小馆</p><h1>${game.restaurant.pawned ? "已典当" : `${game.restaurant.level} 级经营中`}</h1></div></div>
-        <section class="restaurant-control-panel ${game.restaurant.pawned ? "is-pawned" : ""}">
-          <header><div><span>餐厅经营</span><h2>${game.restaurant.pawned ? "停止营业" : "营业中"}</h2></div><strong>${game.restaurant.pawned ? "—" : money(info.income)}<small>${game.restaurant.pawned ? "无收益" : "/ 游戏小时"}</small></strong></header>
-          <div class="restaurant-scene-stats"><div><span>当前等级</span><b>Lv.${game.restaurant.level}</b></div><div><span>周期收益</span><b>${game.restaurant.pawned ? "停止" : money(info.income)}</b></div><div><span>典当估值</span><b>${game.restaurant.pawned ? "已领取" : money(info.pawn)}</b></div></div>
-          <div class="restaurant-progress" data-restaurant-progress><div><span>下一次结算</span><em>${game.restaurant.pawned ? "已停止" : `${worldMinutesRemaining} 游戏分钟后`}</em></div><i><b style="width:${progress * 100}%"></b></i></div>
-          <div class="restaurant-actions"><button class="primary" data-action="upgrade" ${game.restaurant.pawned || max || game.cash < (info.nextCost ?? 0) ? "disabled" : ""}>${max ? "已达最高等级" : `升级 · ${money(info.nextCost!)}`}</button><button class="danger" data-action="pawn" ${game.restaurant.pawned ? "disabled" : ""}>典当 · 获得 ${money(info.pawn)}</button></div>
+        <div class="restaurant-scene-header"><div><p class="eyebrow">稳定收入 · 外港小馆</p><h1>${game.restaurant.pawned ? "已典当" : game.restaurant.open ? `${game.restaurant.level} 级经营中` : "今日已打烊"}</h1></div></div>
+        <section class="restaurant-control-panel ${game.restaurant.pawned ? "is-pawned" : ""} ${game.restaurant.open ? "is-open" : "is-closed"}">
+          <header><div><span>餐厅经营 · 08:00 - 20:00</span><h2>${game.restaurant.pawned ? "停止营业" : game.restaurant.open ? "营业中" : "已打烊"}</h2></div><strong>${game.restaurant.pawned || !game.restaurant.open ? "—" : money(info.income)}<small>${game.restaurant.pawned ? "无收益" : game.restaurant.open ? "/ 游戏小时" : "等待继续营业"}</small></strong></header>
+          <div class="restaurant-scene-stats"><div><span>当前等级</span><b>Lv.${game.restaurant.level}</b></div><div><span>周期收益</span><b>${game.restaurant.pawned || !game.restaurant.open ? "停止" : money(info.income)}</b></div><div><span>典当估值</span><b>${game.restaurant.pawned ? "已领取" : money(info.pawn)}</b></div></div>
+          <div class="restaurant-progress ${game.restaurant.open ? "" : "is-stopped"}" data-restaurant-progress><div><span>下一次结算</span><em>${game.restaurant.pawned ? "已停止" : game.restaurant.open ? `${worldMinutesRemaining} 游戏分钟后` : "餐厅已打烊"}</em></div><i><b style="width:${game.restaurant.open ? progress * 100 : 0}%"></b></i></div>
+          <div class="restaurant-actions">${!game.restaurant.open && !game.restaurant.pawned ? `<button class="primary" data-action="continue-restaurant">继续营业 · 至下次打烊</button>` : ""}<button class="primary" data-action="upgrade" ${game.restaurant.pawned || max || game.cash < (info.nextCost ?? 0) ? "disabled" : ""}>${max ? "已达最高等级" : `升级 · ${money(info.nextCost!)}`}</button><button class="danger" data-action="pawn" ${game.restaurant.pawned ? "disabled" : ""}>典当 · 获得 ${money(info.pawn)}</button></div>
         </section>
       </div>
     </section>
@@ -595,16 +701,19 @@ function dealingView(): string {
   const settlementKind = !pending.bet ? "watch" : result?.outcome === pending.bet.side ? "hit" : result?.outcome === "tie" ? "push" : "miss";
   const settlementSeal = settlementKind === "hit" ? "中" : settlementKind === "miss" ? "负" : settlementKind === "push" ? "和" : "看";
   const settlementAmount = settlementKind === "hit" ? `盈利 +${money(delta)}` : settlementKind === "miss" ? `损失 -${money(Math.abs(delta))}` : settlementKind === "push" ? "本金已退回" : "本局未下注";
-  const statusTitle = dealStage === "settled" ? result!.outcome === "tie" ? "和局" : `${outcomeName(result!.outcome)}家胜` : dealStage === "animating" ? "荷官发牌" : dealStage === "drawing-card" ? `${outcomeName(sequence[dealtCardCount - 1]!.side)}家补牌` : dealStage === "dealer-revealing" ? "荷官开牌" : `剩余 ${dealtCardCount - revealedCardIndices.size} 张未开`;
+  const chipSettlementKind = !pending.bet ? null : pending.result.outcome === pending.bet.side ? "win" : pending.result.outcome === "tie" ? "push" : "lose";
+  const chipTransferLabel = chipSettlementKind === "win" ? `荷官赔付 · +${money(Math.max(0, delta))}` : chipSettlementKind === "lose" ? `荷官收注 · ${money(pending.bet?.amount ?? 0)}` : chipSettlementKind === "push" ? "和局退注 · 本金返还" : "";
+  const statusTitle = dealStage === "settled" ? result!.outcome === "tie" ? "和局" : `${outcomeName(result!.outcome)}家胜` : dealStage === "settling-chips" ? chipTransferLabel : dealStage === "animating" ? "荷官发牌" : dealStage === "drawing-card" ? `${outcomeName(sequence[dealtCardCount - 1]!.side)}家补牌` : dealStage === "dealer-revealing" ? "荷官开牌" : `剩余 ${dealtCardCount - revealedCardIndices.size} 张未开`;
   return shell(`
     <section class="table-page table-dealing immersive-dealing ${dealStage}">
-      <div class="table-header"><span class="table-header-actions"><button class="secondary table-lobby-link" data-action="lobby">返回大厅</button></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${dealStage === "settled" ? table.round : table.round + 1} 局</span></div>
+      <div class="table-header"><span class="table-header-actions"><button class="secondary table-lobby-link" data-action="lobby" ${dealStage === "settling-chips" ? "disabled" : ""}>返回大厅</button></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${dealStage === "settled" || dealStage === "settling-chips" ? table.round : table.round + 1} 局</span></div>
       <div class="table-layout">
         <section class="betting-panel live-deal-panel">
           <div class="deal-status"><div class="deal-status-title"><p class="eyebrow">${dealStage === "settled" ? betFeedback : isWatching ? "旁观牌局" : `已押${outcomeName(pending.bet!.side)} · ${money(pending.bet!.amount)}`}</p><h1>${statusTitle}</h1></div>${dealStage === "settled" ? "" : liveBaccaratScore(pending)}<span>${dealStage === "settled" ? `庄 ${result!.bankerPoints} 点 · 闲 ${result!.playerPoints} 点` : ownedSide ? confidenceFeedback : "本局全部由荷官开牌 · 信心不变"}</span>${dealStage !== "settled" ? confidenceBreakdownView(pending) : ""}</div>
           <div class="immersive-table-stage">
             <div id="table-3d-stage" aria-label="3D百家乐牌桌"></div>
-            ${pending.bet ? `<div class="active-bet-marker ${pending.bet.side}"><i></i><span>押${outcomeName(pending.bet.side)}</span><strong>${money(pending.bet.amount)}</strong></div>` : ""}
+            ${pending.bet && dealStage !== "settling-chips" ? `<div class="active-bet-marker ${pending.bet.side}"><i></i><span>押${outcomeName(pending.bet.side)}</span><strong>${money(pending.bet.amount)}</strong></div>` : ""}
+            ${dealStage === "settling-chips" ? `<div class="chip-transfer-callout ${chipSettlementKind}"><span>${chipSettlementKind === "win" ? "PAYOUT" : chipSettlementKind === "lose" ? "COLLECT" : "PUSH"}</span><strong>${chipTransferLabel}</strong></div>` : ""}
             ${revealChoice}
             ${dealStage === "settled" ? `<div class="table-settlement ${settlementKind}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭结算"><section class="settlement-verdict"><i>${settlementSeal}</i><span>本局 ${outcomeName(result!.outcome)}${result!.outcome === "tie" ? "局" : "家胜"}</span><b>${betFeedback}</b><strong>${settlementAmount}</strong>${pending.bet ? `<small>押${outcomeName(pending.bet.side)} · ${money(pending.bet.amount)}</small>` : ""}${lastSettlement?.income ? `<em>餐厅同期到账 +${money(lastSettlement.income)}</em>` : ""}</section><div class="settlement-hands"><div><span>庄家 · ${result!.bankerPoints} 点</span><strong>${result!.bankerCards.map(cardLabel).join(" · ")}</strong></div><div><span>闲家 · ${result!.playerPoints} 点</span><strong>${result!.playerCards.map(cardLabel).join(" · ")}</strong></div></div><small class="settlement-dismiss-hint">点击任意位置返回牌桌</small></div>` : ""}
           </div>
@@ -719,6 +828,35 @@ function render(): void {
   if (view === "table" && inlineWatchActive) setupInlineWatch();
 }
 
+type RestMode = "natural" | "next-opening" | "forced";
+
+function startRestTransition(mode: RestMode = "natural"): void {
+  const forced = mode === "forced";
+  if (mode === "natural" && !game.canRestUntilNaturalWake()) {
+    restChoiceOpen = false;
+    render();
+    return;
+  }
+  if (sleepTransitionActive || (!forced && (!game.canRestAtHome() || activeActivity !== "home"))) return;
+  sleepTransitionActive = true;
+  wakeAfterForcedRest = forced;
+  const overlay = document.createElement("div");
+  overlay.className = "sleep-transition";
+  overlay.setAttribute("aria-hidden", "true");
+  document.body.append(overlay);
+  window.setTimeout(() => {
+    if (mode === "forced") game.recoverFromSleepDeprivation();
+    else if (mode === "natural") game.restUntilNaturalWake();
+    else game.restUntilNextOpening();
+    wakePromptOpen = true;
+  }, 520);
+  window.setTimeout(() => {
+    sleepTransitionActive = false;
+    overlay.remove();
+    render();
+  }, 1100);
+}
+
 function settleOnTable(): void {
   const pending = game.pending!;
   lastRound = pending;
@@ -726,13 +864,14 @@ function settleOnTable(): void {
   roadCreationFailure = lastSettlement.roadCreation?.matched === false ? lastSettlement.roadCreation : null;
   if (lastSettlement.roadCreation) roadMarkFeedback = null;
   divineSpecialPending = divineActivationsThisRound >= 3 && lastSettlement.delta > 0;
-  dealStage = "settled";
-  view = game.gameOver ? "game-over" : "dealing";
+  dealStage = pending.bet ? "settling-chips" : "settled";
+  view = "dealing";
   render();
 }
 
 function setupDealing(): void {
   const pending = game.pending ?? lastRound!;
+  const casino = casinos.find((item) => item.id === casinoId)!;
   const host = document.querySelector<HTMLElement>("#table-3d-stage");
   if (!host) return;
   tableScene = new TableScene(host);
@@ -747,6 +886,22 @@ function setupDealing(): void {
       render();
     }
   }, animateFromIndex, playerOwnedSide(pending));
+  const denominations = chipDenominations(casino);
+  const recordedWagerTotal = roundWagerChips.reduce((sum, chip) => sum + chip.value, 0);
+  const wagerChips = pending.bet && recordedWagerTotal === pending.bet.amount
+    ? roundWagerChips
+    : composeChipAmount(pending.bet?.amount ?? 0, denominations);
+  if (pending.bet && dealStage !== "settling-chips") {
+    tableScene.showWagerChips(pending.bet.side, wagerChips);
+  }
+  if (dealStage === "settling-chips" && pending.bet && lastSettlement) {
+    const kind = pending.result.outcome === pending.bet.side ? "win" : pending.result.outcome === "tie" ? "push" : "lose";
+    const payoutChips = kind === "win" ? composeChipAmount(Math.max(0, lastSettlement.delta), denominations) : [];
+    tableScene.animateChipSettlement(kind, pending.bet.side, wagerChips, payoutChips, () => {
+      dealStage = "settled";
+      render();
+    });
+  }
   if (dealStage === "dealer-revealing") viewTimers.push(window.setTimeout(revealNextAutomatically, 280));
   if (dealStage === "settled" && divineSpecialPending && !roadCreationFailure) viewTimers.push(window.setTimeout(showDivineSpecialEvent, 320));
 }
@@ -1086,13 +1241,74 @@ function bind(): void {
     if (inlineWatchActive && !inlineWatchSettled && navigationAction) return;
     if (inlineWatchActive && inlineWatchSettled && navigationAction) resetInlineWatch();
     if (view === "table" && action && ["map", "restaurant", "skills", "casinos", "lobby"].includes(action)) resetBetDraft(true);
-    if (action === "map") view = "map";
-    if (action === "restaurant") { activeActivity = "restaurant"; view = "restaurant"; }
-    if (action === "skills") { activeActivity = "home"; view = "skills"; }
+    if (action === "map") {
+      homeSkillManagementOpen = false;
+      view = "map";
+    }
+    if (action === "restaurant") {
+      activeActivity = "restaurant";
+      view = "restaurant";
+    }
+    if (action === "skills") {
+      homeSkillManagementOpen = false;
+      activeActivity = "home";
+      view = "skills";
+    }
     if (action === "casinos") { activeActivity = "casino"; view = "casino-select"; }
     if (action === "lobby") view = "lobby";
     if (action === "upgrade") game.upgradeRestaurant();
     if (action === "pawn" && confirm(`典当后餐厅将停止产出。确认典当并获得 ${money(game.restaurantInfo().pawn)}？`)) game.pawnRestaurant();
+    if (action === "close-restaurant") {
+      game.closeRestaurant();
+      restaurantClosingPromptOpen = false;
+      activeActivity = "home";
+      view = "skills";
+    }
+    if (action === "continue-restaurant") {
+      game.continueRestaurantThroughNextClose();
+      restaurantClosingPromptOpen = false;
+    }
+    if (action === "rest-at-home") {
+      restChoiceOpen = true;
+      return;
+    }
+    if (action === "open-rest-options") {
+      restChoiceOpen = true;
+      render();
+      return;
+    }
+    if (action === "rest-natural" || action === "rest-next-opening") {
+      restChoiceOpen = false;
+      startRestTransition(action === "rest-natural" ? "natural" : "next-opening");
+      return;
+    }
+    if (action === "open-skill-management") homeSkillManagementOpen = true;
+    if (action === "close-skill-management") homeSkillManagementOpen = false;
+    if (action === "confirm-sleep-collapse") {
+      if (game.pending) game.settle();
+      resetBetDraft(true);
+      roundWagerChips = [];
+      inlineWatchActive = false;
+      tablePlayerInteractionActive = false;
+      sleepCollapsePromptOpen = false;
+      homeSkillManagementOpen = false;
+      activeActivity = "home";
+      view = "skills";
+      startRestTransition("forced");
+      return;
+    }
+    if (action === "confirm-sleep-deprivation") sleepDeprivationNoticeOpen = false;
+    if (action === "open-restaurant-after-rest") {
+      game.openRestaurant();
+      wakePromptOpen = false;
+      wakeAfterForcedRest = false;
+      activeActivity = "restaurant";
+      view = "restaurant";
+    }
+    if (action === "cancel-wake") {
+      wakePromptOpen = false;
+      wakeAfterForcedRest = false;
+    }
     if (action === "equip-skill") game.equipSkill(element.dataset.skill as SkillId);
     if (action === "unequip-skill") game.equipSkill(null);
     if (action === "upgrade-skill") game.upgradeSkill(element.dataset.skill as SkillId);
@@ -1105,10 +1321,12 @@ function bind(): void {
     if (action === "cancel-bet") {
       const refund = game.cancelReservedBet();
       stagedBetSide = null;
+      stagedBetChips = [];
       betDraftNotice = refund > 0 ? `已撤回 ${money(refund)}` : "当前没有可撤回筹码";
     }
     if (action === "watch") {
       resetBetDraft(true);
+      roundWagerChips = [];
       roadCreationFailure = null;
       game.play(tableId, null);
       inlineWatchActive = true;
@@ -1120,6 +1338,7 @@ function bind(): void {
     }
     if (action === "confirm-bet" && stagedBetSide && game.reservedBetAmount > 0) {
       roadCreationFailure = null;
+      roundWagerChips = [...stagedBetChips];
       game.play(tableId, { side: stagedBetSide, amount: game.reservedBetAmount });
       resetBetDraft(false);
       revealedCardIndices.clear(); divineCheckedStages.clear(); divineRevealFeedback.clear(); divineActivationsThisRound = 0; divineSpecialPending = false; tablePlayerInteractionActive = false; dealtCardCount = 4; dealStage = "animating"; view = "dealing";
@@ -1147,7 +1366,7 @@ function bind(): void {
       if (inlineWatchActive) resetInlineWatch();
       else tablePlayerInteractionActive = false;
       dealStage = "animating";
-      view = "table";
+      view = game.gameOver ? "game-over" : "table";
     }
     if (action === "continue" && inlineWatchActive) {
       resetInlineWatch();
@@ -1320,9 +1539,17 @@ function bind(): void {
       return;
     }
     stagedBetSide = side;
+    stagedBetChips.push({ value: selectedChip, colorIndex: chipDenominations(casino).indexOf(selectedChip) });
     betDraftNotice = `已投入一枚 ${money(selectedChip)} 筹码`;
     render();
   }));
+
+  const restChoiceBackdrop = app.querySelector<HTMLElement>("[data-rest-choice-backdrop]");
+  restChoiceBackdrop?.addEventListener("click", (event) => {
+    if (event.target !== restChoiceBackdrop) return;
+    restChoiceOpen = false;
+    render();
+  });
 }
 
 render();
@@ -1338,16 +1565,42 @@ window.setInterval(() => {
   const atTable = view === "table" || view === "dealing";
   const insideCasino = activeActivity === "casino";
   const paused = worldTimePaused();
-  const tick = game.tickRealtime(Date.now(), atTable ? tableId : null, insideCasino, paused);
+  const tick = game.tickRealtime(Date.now(), atTable ? tableId : null, insideCasino, paused, activeActivity === "restaurant");
   if (tick.income > 0) game.notice = `餐厅到账 ${money(tick.income)}`;
+  if (tick.sleepDeprivationStarted) {
+    sleepDeprivationNoticeOpen = true;
+    render();
+    return;
+  }
+  if (tick.sleepDeprivationCollapseReached) {
+    sleepCollapsePromptOpen = true;
+    render();
+    return;
+  }
+  if (tick.restaurantClosingReached) {
+    restaurantClosingPromptOpen = true;
+    render();
+    return;
+  }
 
   const wallet = document.querySelector<HTMLElement>(".wallet strong");
   if (wallet) wallet.textContent = money(game.cash);
 
   const worldClock = document.querySelector<HTMLElement>("[data-world-clock]");
   if (worldClock) worldClock.textContent = worldTimeLabel();
+  const worldTimeSummary = document.querySelector<HTMLElement>("[data-world-time-summary]");
+  if (worldTimeSummary) worldTimeSummary.textContent = worldTimeLabel();
+  const mapWorld = document.querySelector<HTMLElement>("[data-map-world]");
+  if (mapWorld) {
+    const daylight = worldIsDaylight();
+    mapWorld.classList.toggle("daylight", daylight);
+    mapWorld.classList.toggle("night", !daylight);
+  }
   const worldClockWrap = document.querySelector<HTMLElement>(".world-clock");
   worldClockWrap?.classList.toggle("paused", paused);
+  worldClockWrap?.classList.toggle("sleep-deprived", game.isSleepDeprived());
+  const sleepStatus = document.querySelector<HTMLElement>("[data-sleep-status]");
+  if (sleepStatus) sleepStatus.hidden = !game.isSleepDeprived();
 
   const restaurantClock = document.querySelector<HTMLElement>("[data-restaurant-clock]");
   const worldMinutesRemaining = Math.ceil(RESTAURANT_CYCLE_WORLD_MINUTES - game.restaurant.cycleElapsedWorldMinutes);
@@ -1360,8 +1613,8 @@ window.setInterval(() => {
   if (restaurantProgress) {
     const bar = restaurantProgress.querySelector<HTMLElement>("i b");
     const label = restaurantProgress.querySelector<HTMLElement>("em");
-    if (bar) bar.style.width = `${game.restaurant.cycleElapsedWorldMinutes / RESTAURANT_CYCLE_WORLD_MINUTES * 100}%`;
-    if (label) label.textContent = `${worldMinutesRemaining} 游戏分钟后结算`;
+    if (bar) bar.style.width = `${game.restaurant.open ? game.restaurant.cycleElapsedWorldMinutes / RESTAURANT_CYCLE_WORLD_MINUTES * 100 : 0}%`;
+    if (label) label.textContent = game.restaurant.pawned ? "已停止" : game.restaurant.open ? `${worldMinutesRemaining} 游戏分钟后结算` : "餐厅已打烊";
   }
   document.querySelectorAll<HTMLElement>("[data-table-clock]").forEach((clock) => {
     const table = game.table(clock.dataset.tableClock!);
