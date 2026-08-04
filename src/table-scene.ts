@@ -64,11 +64,11 @@ export function composeChipAmount(amount: number, denominations: number[]): Tabl
 }
 
 export function tableCardPositions(entry: Pick<TableCard, "side" | "handIndex">, ownedSide: Side | null): TableCardPositions {
-  const handOffsets = [-0.75, 0.75, 1.95];
-  const handOffset = handOffsets[entry.handIndex] ?? 1.95 + (entry.handIndex - 2) * 1.3;
-  const pushedOffsets = [-0.75, 0.75, 2.05];
-  const pushedX = pushedOffsets[entry.handIndex] ?? 2.05 + (entry.handIndex - 2) * 1.3;
-  const sideCenter = entry.side === "player" ? -2.25 : 2.25;
+  const handOffsets = [-1.5, 1.5, 3.9];
+  const handOffset = handOffsets[entry.handIndex] ?? 3.9 + (entry.handIndex - 2) * 2.6;
+  const pushedOffsets = [-1.5, 1.5, 4.1];
+  const pushedX = pushedOffsets[entry.handIndex] ?? 4.1 + (entry.handIndex - 2) * 2.6;
+  const sideCenter = entry.side === "player" ? -4.45 : 4.45;
   const tableX = sideCenter + (entry.side === "player" ? handOffset : -handOffset);
   const table = { x: tableX, y: 0.025, z: -0.72 };
   const resting = ownedSide === entry.side
@@ -211,17 +211,12 @@ export class TableScene {
     light.position.set(-4, 7, 5);
     light.castShadow = true;
     this.scene.add(light);
-    const felt = new THREE.Mesh(new THREE.PlaneGeometry(15, 11), new THREE.MeshStandardMaterial({ color: 0x124534, roughness: 0.92 }));
+    const felt = new THREE.Mesh(new THREE.PlaneGeometry(16, 11), new THREE.MeshStandardMaterial({ color: 0x124534, roughness: 0.92 }));
     felt.rotation.x = -Math.PI / 2;
     felt.receiveShadow = true;
     this.scene.add(felt);
-    const rail = new THREE.Mesh(new THREE.TorusGeometry(5.2, 0.07, 10, 80, Math.PI), new THREE.MeshStandardMaterial({ color: 0xcda757, metalness: 0.25, roughness: 0.48 }));
-    rail.rotation.x = -Math.PI / 2;
-    rail.rotation.z = Math.PI;
-    rail.position.z = -0.35;
-    this.scene.add(rail);
-    this.addCardArea("PLAYER", 0x77c5ed, -2.25);
-    this.addCardArea("BANKER", 0xef9b87, 2.25);
+    this.addCardArea("PLAYER", 0x77c5ed, -4.45);
+    this.addCardArea("BANKER", 0xef9b87, 4.45);
     this.addCardShoe();
     window.addEventListener("resize", this.resize);
     this.resize();
@@ -493,6 +488,8 @@ export class TableScene {
 
   private createChipPile(position: THREE.Vector3, chips: TableChip[]): THREE.Group {
     const group = new THREE.Group();
+    // Keep the card's local squeeze geometry unchanged while presenting a larger table card.
+    group.scale.setScalar(2);
     const grouped = new Map<string, TableChip[]>();
     chips.forEach((chip) => {
       const key = `${chip.colorIndex}:${chip.value}`;
@@ -1020,7 +1017,7 @@ export class TableScene {
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     this.textures.push(texture);
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(3.15, 2.3), new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }));
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(6.1, 4.6), new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }));
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(x, 0.014, -0.92);
     this.scene.add(mesh);
@@ -1150,8 +1147,8 @@ export class TableScene {
       }
     }
     if (this.focusTarget) {
-      this.camera.position.lerp(this.focusTarget.position, 0.105);
-      this.cameraLookAt.lerp(this.focusTarget.lookAt, 0.105);
+      this.camera.position.lerp(this.focusTarget.position, 0.2);
+      this.cameraLookAt.lerp(this.focusTarget.lookAt, 0.2);
       if (this.camera.position.distanceTo(this.focusTarget.position) < 0.05 && this.cameraLookAt.distanceTo(this.focusTarget.lookAt) < 0.05) {
         const done = this.focusTarget.done;
         this.focusTarget = null;

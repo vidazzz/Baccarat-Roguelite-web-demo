@@ -76,7 +76,7 @@ describe("squeeze direction snapping", () => {
     const owned = tableCardPositions({ side: "banker", handIndex: 1 }, "banker");
     const dealer = tableCardPositions({ side: "player", handIndex: 1 }, "banker");
     expect(owned.resting.z).toBeGreaterThan(owned.table.z);
-    expect(owned.resting.x).toBeCloseTo(0.75);
+    expect(owned.resting.x).toBeCloseTo(1.5);
     expect(dealer.resting).toEqual(dealer.table);
   });
 

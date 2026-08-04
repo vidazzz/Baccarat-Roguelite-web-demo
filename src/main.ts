@@ -24,7 +24,6 @@ let stagedBetSide: Outcome | null = null;
 let stagedBetChips: TableChip[] = [];
 let roundWagerChips: TableChip[] = [];
 let selectedChip = 100;
-let betDraftNotice = "选择筹码后，点击下注区落注";
 let tableScene: TableScene | null = null;
 let lastSettlement: SettlementResult | null = null;
 let lastRound: PendingRound | null = null;
@@ -133,7 +132,6 @@ function resetBetDraft(refund = true): void {
   if (refund) game.cancelReservedBet();
   stagedBetSide = null;
   stagedBetChips = [];
-  betDraftNotice = "选择筹码后，点击下注区落注";
 }
 const worldTimeLabel = () => {
   const { day, hour, minute } = game.worldTimeInfo();
@@ -250,14 +248,14 @@ function roadMarkOverlay(table: GameTable, roadBook: RoadBook, visibleFrom: numb
   return `<span class="road-mark-range" style="--mark-start:${start}"></span>`;
 }
 
-function road(table: GameTable, compact = false, interactive = false): string {
+function road(table: GameTable, compact = false, interactive = false, columnOverride?: number): string {
   const cells = makeBigRoad(table.history);
   const previews = roadPreviewCells(table, "big");
   const ghosts = roadCreatedCells(table, "big");
   const maxColumn = Math.max(...cells.map((cell) => cell.column), ...previews.map((cell) => cell.column), ...ghosts.map((cell) => cell.column), 0);
-  const columns = compact ? 12 : 28;
+  const columns = columnOverride ?? (compact ? 12 : 28);
   const visibleFrom = Math.max(0, maxColumn - columns + 1);
-  return `<div class="road ${compact ? "compact" : ""} ${interactive ? "creatable-road" : ""}" aria-label="${table.name} 大路" data-road-window data-visible-from="${visibleFrom}" data-columns="${columns}">${roadMarkOverlay(table, "big", visibleFrom, columns)}${cells
+  return `<div class="road ${compact ? "compact" : ""} ${interactive ? "creatable-road" : ""}" style="--columns:${columns}" aria-label="${table.name} 大路" data-road-window data-visible-from="${visibleFrom}" data-columns="${columns}">${roadMarkOverlay(table, "big", visibleFrom, columns)}${cells
     .filter((cell) => cell.column >= visibleFrom)
     .map((cell) => `<span class="road-dot ${cell.outcome} ${cell.ties ? "has-tie" : ""}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${cell.ties ? `<i>${cell.ties > 1 ? cell.ties : ""}</i>` : ""}</span>`)
     .join("")}${ghosts.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="road-dot created-road-ghost ${cell.side}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}${interactive ? roadCreationTargets(table, "big", visibleFrom) : ""}</div>`;
@@ -283,22 +281,35 @@ function derivedRoad(table: GameTable, cells: DerivedRoadCell[], label: string, 
   return `<div class="derived-block ${kind}"><div class="derived-label ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="${roadBook}" title="点击标题栏对应列标记路数"` : ""}><i class="road-symbol ${kind} red"></i>${label}</div><div class="derived-road ${compact ? "compact" : ""} ${interactive ? "creatable-road" : ""}" style="--columns:${columns}" aria-label="${label}" data-road-window data-visible-from="${visibleFrom}" data-columns="${columns}">${roadMarkOverlay(table, roadBook, visibleFrom, columns)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="derived-mark ${cell.color}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}${ghosts.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="derived-mark created-road-ghost ${cell.color}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}${interactive ? roadCreationTargets(table, roadBook, visibleFrom) : ""}</div></div>`;
 }
 
-function roadSheet(table: GameTable, compact = false, interactive = false): string {
-  const derived = makeDerivedRoads(table.history);
-  const bead = `<section class="bead-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="bead" title="点击标题栏标记整张珠盘路"` : ""}><i class="bead-symbol banker"></i>珠盘路</div>${beadPlate(table, interactive)}</section>`;
-  const big = `<section class="big-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="big" title="点击标题栏对应列标记路数"` : ""}><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive)}</section>`;
-  const derivedRoads = `${derivedRoad(table, derived.bigEye, "大眼仔路", "big-eye", "big-eye", true, interactive)}${derivedRoad(table, derived.small, "小路", "small", "small-road", true, interactive)}${derivedRoad(table, derived.cockroach, "曱甴路", "cockroach", "cockroach-road", true, interactive)}`;
-  const info = `<aside class="road-info-panel">${roadStats(table)}</aside>`;
-  return `<div class="road-sheet road-sheet-desktop ${compact ? "compact" : ""}"><div class="road-board">${bead}${big}<div class="derived-grid">${derivedRoads}</div>${info}</div></div><div class="road-sheet road-sheet-mobile ${compact ? "compact" : ""}"><div class="mobile-road-stack">${bead}${big}<div class="derived-grid">${derivedRoads}</div>${info}</div></div>`;
+function beadRoadPanel(table: GameTable, interactive = false, columns = 9): string {
+  return `<section class="bead-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="bead" title="点击标题栏标记整张珠盘路"` : ""}><i class="bead-symbol banker"></i>珠盘路</div>${beadPlate(table, interactive, columns)}</section>`;
 }
 
-function beadPlate(table: GameTable, interactive = false): string {
+function roadSheet(table: GameTable, compact = false, interactive = false, layout: "full" | "expanded" = "full"): string {
+  const derived = makeDerivedRoads(table.history);
+  const bead = beadRoadPanel(table, interactive);
+  const big = `<section class="big-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="big" title="点击标题栏对应列标记路数"` : ""}><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive, layout === "expanded" ? 30 : undefined)}</section>`;
+  const derivedRoads = (derivedCompact: boolean) => `${derivedRoad(table, derived.bigEye, "大眼仔路", "big-eye", "big-eye", derivedCompact, interactive)}${derivedRoad(table, derived.small, "小路", "small", "small-road", derivedCompact, interactive)}${derivedRoad(table, derived.cockroach, "曱甴路", "cockroach", "cockroach-road", derivedCompact, interactive)}`;
+  const info = `<aside class="road-info-panel">${roadStats(table)}</aside>`;
+  const expandedClass = layout === "expanded" ? "expanded" : "";
+  const desktopBead = layout === "expanded" ? beadRoadPanel(table, interactive, 10) : bead;
+  const mobileBead = layout === "expanded" ? beadRoadPanel(table, interactive, 30) : bead;
+  const desktopRoadContent = layout === "expanded"
+    ? `${info}${desktopBead}${big}<div class="derived-grid">${derivedRoads(false)}</div>`
+    : `${desktopBead}${big}<div class="derived-grid">${derivedRoads(true)}</div>${info}`;
+  const mobileRoadContent = layout === "expanded"
+    ? `${info}${mobileBead}${big}<div class="derived-grid">${derivedRoads(true)}</div>`
+    : `${mobileBead}${big}<div class="derived-grid">${derivedRoads(true)}</div>${info}`;
+  return `<div class="road-sheet road-sheet-desktop ${compact ? "compact" : ""} ${expandedClass}"><div class="road-board">${desktopRoadContent}</div></div><div class="road-sheet road-sheet-mobile ${compact ? "compact" : ""} ${expandedClass}"><div class="mobile-road-stack">${mobileRoadContent}</div></div>`;
+}
+
+function beadPlate(table: GameTable, interactive = false, columns = 9): string {
   const cells = makeBeadPlate(table.history, table.historyOffset);
   const previews = roadPreviewCells(table, "bead");
   const ghosts = roadCreatedCells(table, "bead");
   const maxColumn = Math.max(...cells.map((cell) => cell.column), ...previews.map((cell) => cell.column), ...ghosts.map((cell) => cell.column), 0);
-  const visibleFrom = Math.max(0, maxColumn - 8);
-  return `<div class="bead-plate ${interactive ? "creatable-road" : ""}" aria-label="${table.name} 珠盘路" data-road-window data-visible-from="${visibleFrom}" data-columns="9">${roadMarkOverlay(table, "bead", visibleFrom, 9)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="bead ${cell.outcome}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${outcomeName(cell.outcome)}</span>`).join("")}${ghosts.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="bead created-road-ghost ${cell.side}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${outcomeName(cell.side)}</span>`).join("")}${interactive ? roadCreationTargets(table, "bead", visibleFrom) : ""}</div>`;
+  const visibleFrom = Math.max(0, maxColumn - columns + 1);
+  return `<div class="bead-plate ${interactive ? "creatable-road" : ""}" style="--columns:${columns}" aria-label="${table.name} 珠盘路" data-road-window data-visible-from="${visibleFrom}" data-columns="${columns}">${roadMarkOverlay(table, "bead", visibleFrom, columns)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="bead ${cell.outcome}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${outcomeName(cell.outcome)}</span>`).join("")}${ghosts.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="bead created-road-ghost ${cell.side}" style="--row:${cell.row};--col:${cell.column - visibleFrom}">${outcomeName(cell.side)}</span>`).join("")}${interactive ? roadCreationTargets(table, "bead", visibleFrom) : ""}</div>`;
 }
 
 function mapView(): string {
@@ -422,7 +433,7 @@ function lobbyTableContent(table: GameTable, casino: Casino): string {
   return `
     <div class="table-top"><strong>${table.name}</strong><span class="live" data-table-clock="${table.id}"><i></i>${Math.ceil((LOBBY_ROUND_MS - table.realtimeElapsedMs) / 1000)}s 开牌</span></div>
     <div class="table-shape"><span>庄</span><b>和</b><span>闲</span></div>
-    ${roadSheet(table)}
+    ${roadSheet(table, false, false, "expanded")}
     <div class="table-meta"><span class="pattern ${pattern.id !== "none" ? "active" : ""}">${pattern.name}</span><span>${money(casino.minBet)} - ${money(casino.maxBet)}</span></div>
   `;
 }
@@ -463,7 +474,6 @@ function tableView(): string {
   const table = game.table(tableId);
   const watchPending = inlineWatchActive ? game.pending ?? lastRound : null;
   const watchResult = inlineWatchSettled ? watchPending?.result ?? null : null;
-  const probability = game.previewProbability(tableId);
   const stagedAmount = game.reservedBetAmount;
   const denominations = chipDenominations(casino);
   if (!denominations.includes(selectedChip)) selectedChip = denominations[0] ?? casino.minBet;
@@ -480,40 +490,37 @@ function tableView(): string {
   const confidenceMessage = !stagedBetSide
     ? createdRoad ? `预想下一局${outcomeName(createdRoad)} · 信心待封盘结算` : "路数预判待定 · 信心待封盘结算"
     : `已押${outcomeName(stagedBetSide)} · 确认下注后才揭示信心变化`;
-  const zone = (side: Outcome, english: string, odds: string, chance: number) => {
+  const zone = (side: Outcome, english: string, odds: string) => {
     const active = stagedBetSide === side && stagedAmount > 0;
     return `<button class="table-bet-zone ${side} ${active ? "has-wager" : ""}" data-bet-zone="${side}" aria-label="在${outcomeName(side)}区下注 ${money(selectedChip)}" ${inlineWatchActive ? "disabled" : ""}>
       <span><b>${outcomeName(side)}</b><em>${english}</em><i>${odds}</i></span>
-      <small>${(chance * 100).toFixed(1)}% 路势概率</small>
       ${active ? `<span class="zone-wager"><i></i><i></i><i></i><strong>${money(stagedAmount)}</strong></span>` : ""}
     </button>`;
   };
   const canConfirm = Boolean(stagedBetSide) && stagedAmount >= casino.minBet && stagedAmount <= casino.maxBet;
   return shell(`
     <section class="table-page">
-      <div class="table-header"><span class="table-header-spacer" aria-hidden="true"></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${inlineWatchSettled ? table.round : table.round + 1} 局</span></div>
+      <div class="table-header table-header-status"><span class="round-count">第 ${inlineWatchSettled ? table.round : table.round + 1} 局</span></div>
       <div class="table-layout">
         <section class="betting-panel ${inlineWatchActive ? "inline-watching" : ""}">
           <div class="table-felt ${inlineWatchActive ? "watch-active" : ""}">
             <div class="table-session-meta"><span>${inlineWatchActive ? `旁观牌局 · ${inlineWatchStatus(watchPending!)}` : `限红 ${money(casino.minBet)} - ${money(casino.maxBet)}`}</span></div>
-            <div class="dealer-apron ${inlineWatchActive ? "inline-watch-apron" : ""}">${inlineWatchActive ? `${inlineWatchHand(watchPending!, "player")}<strong>${inlineWatchStatus(watchPending!)}</strong>${inlineWatchHand(watchPending!, "banker")}` : `<div class="table-hand-placement player"><span>PLAYER</span><i></i><i></i></div><strong>风云</strong><div class="table-hand-placement banker"><span>BANKER</span><i></i><i></i></div>`}</div>
-            <div class="bet-zones">${zone("player", "PLAYER", "1:1", probability.player)}${zone("tie", "TIE", "1:8", probability.tie)}${zone("banker", "BANKER", "1:0.95", probability.banker)}</div>
+            <div class="dealer-apron ${inlineWatchActive ? "inline-watch-apron" : ""}">${inlineWatchActive ? `${inlineWatchHand(watchPending!, "player")}<strong>${inlineWatchStatus(watchPending!)}</strong>${inlineWatchHand(watchPending!, "banker")}` : `<div class="table-hand-placement player"><span>PLAYER</span><i></i><i></i></div><span class="dealer-apron-gap" aria-hidden="true"></span><div class="table-hand-placement banker"><span>BANKER</span><i></i><i></i></div>`}</div>
+            <div class="bet-zones">${zone("player", "PLAYER", "1:1")}${zone("tie", "TIE", "1:8")}${zone("banker", "BANKER", "1:0.95")}</div>
             ${watchResult ? `<div class="inline-watch-result ${watchResult.outcome}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭旁观结算"><i>${watchResult.outcome === "tie" ? "和" : outcomeName(watchResult.outcome)}</i><span>旁观结算</span><h2>${watchResult.outcome === "tie" ? "本局和局" : `${outcomeName(watchResult.outcome)}家胜`}</h2><p>庄 ${watchResult.bankerPoints} 点 · 闲 ${watchResult.playerPoints} 点</p><small>点击任意位置返回牌桌</small></div>` : ""}
           </div>
           <div class="bet-controls">
-            ${inlineWatchActive ? "" : stagedAmount > 0 ? `<div class="bet-command-bar">
-              <button class="secondary" data-action="cancel-bet"><span>↶</span>取消</button>
-              <button class="primary" data-action="confirm-bet" ${canConfirm ? "" : "disabled"}><span>✓</span>确认</button>
-            </div>` : `<div class="bet-command-bar single-action"><button class="secondary chip-watch-action" data-action="watch">旁观本局</button></div>`}
             <div class="chip-console">
               <div class="chip-tray" aria-label="筹码面额">${denominations.map((amount, index) => `<button class="bet-chip chip-${index + 1} ${selectedChip === amount ? "selected" : ""}" data-chip="${amount}" aria-label="选择${money(amount)}筹码" ${inlineWatchActive ? "disabled" : ""}><span>${amount >= 1000 ? `${amount / 1000}K` : amount}</span></button>`).join("")}</div>
-              <div class="stake-summary"><span>${inlineWatchActive ? "旁观中" : stagedBetSide ? `已押${outcomeName(stagedBetSide)}` : "尚未落注"}</span><strong>${inlineWatchActive ? "—" : money(stagedAmount)}</strong><small>${inlineWatchActive ? inlineWatchStatus(watchPending!) : betDraftNotice}</small></div>
-              <div class="table-balance"><span>可用现金</span><strong>${money(game.cash)}</strong></div>
+              ${inlineWatchActive ? "" : stagedAmount > 0 ? `<div class="bet-command-bar">
+                <button class="secondary" data-action="cancel-bet"><span>↶</span>取消</button>
+                <button class="primary" data-action="confirm-bet" ${canConfirm ? "" : "disabled"}><span>✓</span>确认</button>
+              </div>` : `<div class="bet-command-bar single-action"><button class="secondary chip-watch-action" data-action="watch">旁观本局</button></div>`}
             </div>
             <div class="confidence-readout"><span>当前信心 ${Math.round(game.confidence * 100)}%</span><strong>${confidenceMessage}</strong></div>
           </div>
         </section>
-        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2><div class="road-mark-actions"><span class="road-creation-status ${createdRoad ? "active" : ""}">${createdRoad ? `已创造 ${createdRoads.length} 局 · 下一局${outcomeName(createdRoad)}` : "创造路数"}</span><span class="pattern ${markedBookCount ? "active" : ""}">${markedBookCount ? `已标记 ${markedBookCount} 路 · DEBUG 有效 ${markedPatterns.length} 路` : "未标记"}</span>${markedBookCount ? "<button class=\"clear-road-marks\" data-action=\"clear-road-marks\">全清标记</button>" : ""}</div></div>${roadFeedback}${recognizedPatternList}${roadSheet(table, false, !inlineWatchActive)}</aside>
+        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2><div class="road-mark-actions">${createdRoad ? `<span class="road-creation-status active">已创造 ${createdRoads.length} 局 · 下一局${outcomeName(createdRoad)}</span>` : ""}${markedBookCount ? `<span class="pattern active">已标记 ${markedBookCount} 路 · DEBUG 有效 ${markedPatterns.length} 路</span><button class="clear-road-marks" data-action="clear-road-marks">全清标记</button>` : ""}</div></div>${roadFeedback}${recognizedPatternList}${roadSheet(table, false, !inlineWatchActive, "expanded")}</aside>
       </div>
       ${roadCreationResolutionView()}
     </section>
@@ -674,7 +681,6 @@ function confidenceBreakdownView(pending: PendingRound): string {
 
 function dealingView(): string {
   const pending = game.pending ?? lastRound!;
-  const casino = casinos.find((item) => item.id === casinoId)!;
   const table = game.table(tableId);
   const probability = game.previewProbability(tableId);
   const sequence = dealSequence(pending);
@@ -691,7 +697,7 @@ function dealingView(): string {
   const statusTitle = dealStage === "settled" ? result!.outcome === "tie" ? "和局" : `${outcomeName(result!.outcome)}家胜` : dealStage === "settling-chips" ? chipTransferLabel : dealStage === "animating" ? "荷官发牌" : dealStage === "drawing-card" ? `${outcomeName(sequence[dealtCardCount - 1]!.side)}家补牌` : dealStage === "dealer-revealing" ? "荷官开牌" : `剩余 ${dealtCardCount - revealedCardIndices.size} 张未开`;
   return shell(`
     <section class="table-page table-dealing immersive-dealing ${dealStage}">
-      <div class="table-header"><span class="table-header-spacer" aria-hidden="true"></span><div><span>${casino.name}</span><h1>${table.name}</h1></div><span class="round-count">第 ${dealStage === "settled" || dealStage === "settling-chips" ? table.round : table.round + 1} 局</span></div>
+      <div class="table-header table-header-status"><span class="round-count">第 ${dealStage === "settled" || dealStage === "settling-chips" ? table.round : table.round + 1} 局</span></div>
       <div class="table-layout">
         <section class="betting-panel live-deal-panel">
           <div class="deal-status"><div class="deal-status-title"><p class="eyebrow">${dealStage === "settled" ? betFeedback : isWatching ? "旁观牌局" : `已押${outcomeName(pending.bet!.side)} · ${money(pending.bet!.amount)}`}</p><h1>${statusTitle}</h1></div>${dealStage === "settled" ? "" : liveBaccaratScore(pending)}<span>${dealStage === "settled" ? `庄 ${result!.bankerPoints} 点 · 闲 ${result!.playerPoints} 点` : pending.bet ? confidenceFeedback : "本局全部由荷官开牌 · 信心不变"}</span>${dealStage !== "settled" ? confidenceBreakdownView(pending) : ""}</div>
@@ -1357,10 +1363,9 @@ function bind(): void {
     }
     if (action === "dismiss-road-creation-failure") roadCreationFailure = null;
     if (action === "cancel-bet") {
-      const refund = game.cancelReservedBet();
+      game.cancelReservedBet();
       stagedBetSide = null;
       stagedBetChips = [];
-      betDraftNotice = refund > 0 ? `已撤回 ${money(refund)}` : "当前没有可撤回筹码";
     }
     if (action === "watch") {
       resetBetDraft(true);
@@ -1536,30 +1541,25 @@ function bind(): void {
 
   app.querySelectorAll<HTMLElement>("[data-chip]").forEach((element) => element.addEventListener("click", () => {
     selectedChip = Number(element.dataset.chip);
-    betDraftNotice = `已选择 ${money(selectedChip)} 筹码`;
     render();
   }));
   app.querySelectorAll<HTMLElement>("[data-bet-zone]").forEach((element) => element.addEventListener("click", () => {
     const side = element.dataset.betZone as Outcome;
     const casino = casinos.find((item) => item.id === casinoId)!;
     if (stagedBetSide && stagedBetSide !== side) {
-      betDraftNotice = `本轮已押${outcomeName(stagedBetSide)}，请先取消再改押${outcomeName(side)}`;
       render();
       return;
     }
     if (game.reservedBetAmount + selectedChip > casino.maxBet) {
-      betDraftNotice = `超过本桌上限 ${money(casino.maxBet)}`;
       render();
       return;
     }
     if (!game.reserveBetChip(selectedChip)) {
-      betDraftNotice = `现金不足，无法投入 ${money(selectedChip)}`;
       render();
       return;
     }
     stagedBetSide = side;
     stagedBetChips.push({ value: selectedChip, colorIndex: chipDenominations(casino).indexOf(selectedChip) });
-    betDraftNotice = `已投入一枚 ${money(selectedChip)} 筹码`;
     render();
   }));
 
