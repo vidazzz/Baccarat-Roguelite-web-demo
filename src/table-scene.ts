@@ -2,6 +2,8 @@ import * as THREE from "three";
 import { cardFaceAsset } from "./card-assets";
 import { type Card, type Outcome, type Side } from "./domain";
 
+const TABLE_CARD_SCALE = 1.75;
+
 export interface TableCard {
   card: Card;
   side: Side;
@@ -38,7 +40,7 @@ export interface SettlementChipPositions {
 }
 
 export function settlementChipPositions(side: Outcome): SettlementChipPositions {
-  const wagerX = side === "player" ? -2.45 : side === "banker" ? 2.45 : 0;
+  const wagerX = side === "player" ? -5.7 : side === "banker" ? 5.7 : 0;
   return {
     dealer: { x: 0, y: 0.08, z: -3.18 },
     wager: { x: wagerX, y: 0.08, z: 2.95 },
@@ -72,7 +74,7 @@ export function tableCardPositions(entry: Pick<TableCard, "side" | "handIndex">,
   const tableX = sideCenter + (entry.side === "player" ? handOffset : -handOffset);
   const table = { x: tableX, y: 0.025, z: -0.72 };
   const resting = ownedSide === entry.side
-    ? { x: pushedX, y: 0.028, z: 1.48 }
+    ? { x: pushedX, y: 0.028, z: 2.9 }
     : table;
   return { table, resting };
 }
@@ -130,8 +132,7 @@ interface SceneCard {
   group: THREE.Group;
   back: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   face: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-  flapBack: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
-  flapFace: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  foldedFace: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   finger: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   tableTarget: THREE.Vector3;
   target: THREE.Vector3;
@@ -289,8 +290,8 @@ export class TableScene {
     const texture = this.faceTexture(card);
     entry.face.material.map = texture;
     entry.face.material.needsUpdate = true;
-    entry.flapFace.material.map = this.mirroredTexture(texture);
-    entry.flapFace.material.needsUpdate = true;
+    entry.foldedFace.material.map = texture;
+    entry.foldedFace.material.needsUpdate = true;
   }
 
   beginSqueeze(index: number, onProgress: (value: number) => void, onComplete: () => void, onThreshold: (() => void) | null = null): void {
@@ -310,13 +311,11 @@ export class TableScene {
     this.foldNormal.set(0, -1);
     this.foldOffset = this.foldSupport(this.foldNormal);
     entry.face.visible = false;
-    entry.flapBack.visible = true;
-    entry.flapFace.visible = true;
+    entry.foldedFace.visible = true;
     entry.finger.visible = false;
     entry.finger.geometry.setAttribute("position", new THREE.Float32BufferAttribute([], 3));
     entry.finger.material.opacity = 1;
-    entry.flapBack.material.transparent = true;
-    entry.flapFace.material.transparent = true;
+    entry.foldedFace.material.transparent = true;
     entry.back.material.transparent = true;
     this.renderer.domElement.style.cursor = "grab";
   }
@@ -340,8 +339,7 @@ export class TableScene {
     this.squeezeProgress = THREE.MathUtils.clamp(progress, 0, 1);
     this.foldOffset = this.foldSupport(this.foldNormal) * (1 - this.squeezeProgress);
     entry.face.visible = false;
-    entry.flapBack.visible = true;
-    entry.flapFace.visible = true;
+    entry.foldedFace.visible = true;
     entry.finger.visible = true;
     this.updateSqueezeTexture();
   }
@@ -352,8 +350,7 @@ export class TableScene {
     this.squeezeProgress = 0;
     this.foldOffset = this.foldSupport(this.foldNormal);
     entry.face.visible = false;
-    entry.flapBack.visible = false;
-    entry.flapFace.visible = false;
+    entry.foldedFace.visible = false;
     entry.finger.visible = false;
     entry.back.visible = true;
     entry.back.material.map = entry.originalBackMap;
@@ -431,7 +428,7 @@ export class TableScene {
     let paused = false;
     const applyProgress = () => {
       const scale = Math.abs(Math.cos(progress * Math.PI));
-      entry.group.scale.x = Math.max(scale, 0.03);
+      entry.group.scale.x = TABLE_CARD_SCALE * Math.max(scale, 0.03);
       if (progress >= 0.5) {
         entry.back.visible = false;
         entry.face.visible = true;
@@ -458,7 +455,7 @@ export class TableScene {
       applyProgress();
       if (progress < 1) requestAnimationFrame(flip);
       else {
-        entry.group.scale.x = 1;
+        entry.group.scale.x = TABLE_CARD_SCALE;
         entry.revealed = true;
         if (options.keepFocus) {
           onDone();
@@ -488,8 +485,7 @@ export class TableScene {
 
   private createChipPile(position: THREE.Vector3, chips: TableChip[]): THREE.Group {
     const group = new THREE.Group();
-    // Keep the card's local squeeze geometry unchanged while presenting a larger table card.
-    group.scale.setScalar(2);
+    group.scale.setScalar(1.15);
     const grouped = new Map<string, TableChip[]>();
     chips.forEach((chip) => {
       const key = `${chip.colorIndex}:${chip.value}`;
@@ -576,6 +572,7 @@ export class TableScene {
 
   private createCard(entry: TableCard, revealed: boolean, ownedSide: Side | null): SceneCard {
     const group = new THREE.Group();
+    group.scale.setScalar(TABLE_CARD_SCALE);
     const positions = tableCardPositions(entry, ownedSide);
     const tableTarget = new THREE.Vector3(positions.table.x, positions.table.y, positions.table.z);
     const target = new THREE.Vector3(positions.resting.x, positions.resting.y, positions.resting.z);
@@ -584,22 +581,27 @@ export class TableScene {
     const geometry = new THREE.PlaneGeometry(1.15, 1.7);
     const back = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: this.backTexture(), side: THREE.DoubleSide }));
     const face = new THREE.Mesh(geometry.clone(), new THREE.MeshBasicMaterial({ map: this.faceTexture(entry.card), side: THREE.DoubleSide, transparent: true }));
-    const flapGeometry = new THREE.BufferGeometry();
-    const flapBack = new THREE.Mesh(flapGeometry, new THREE.MeshBasicMaterial({ map: back.material.map, side: THREE.FrontSide }));
-    const flapFace = new THREE.Mesh(flapGeometry, new THREE.MeshBasicMaterial({ map: this.mirroredTexture(face.material.map!), side: THREE.BackSide, transparent: true }));
+    const foldedFace = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
+      map: face.material.map,
+      side: THREE.DoubleSide,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    }));
     const finger = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xc58f72, side: THREE.DoubleSide, transparent: true }));
     face.position.z = -0.004;
     face.visible = revealed;
     back.visible = !revealed;
-    flapBack.visible = false;
-    flapFace.visible = false;
+    foldedFace.visible = false;
+    foldedFace.frustumCulled = false;
     finger.visible = false;
-    flapBack.position.z = 0.006;
-    flapFace.position.z = 0.006;
-    group.add(back, face, flapBack, flapFace, finger);
+    foldedFace.position.z = 0.006;
+    foldedFace.renderOrder = 3;
+    finger.renderOrder = 4;
+    group.add(back, face, foldedFace, finger);
     this.scene.add(group);
     return {
-      group, back, face, flapBack, flapFace, finger, tableTarget, target, revealed,
+      group, back, face, foldedFace, finger, tableTarget, target, revealed,
       side: entry.side,
       originalBackMap: back.material.map!,
       revealCanvas: null,
@@ -649,7 +651,7 @@ export class TableScene {
       if (hovered !== this.hoveredCardIndex) {
         this.clearCardHover();
         this.hoveredCardIndex = hovered;
-        if (hovered !== null) this.cards[hovered]!.group.scale.set(1.04, 1.04, 1.04);
+        if (hovered !== null) this.cards[hovered]!.group.scale.setScalar(TABLE_CARD_SCALE * 1.04);
       }
       this.renderer.domElement.style.cursor = hovered === null ? "default" : "pointer";
       return;
@@ -784,7 +786,7 @@ export class TableScene {
   }
 
   private clearCardHover(): void {
-    if (this.hoveredCardIndex !== null) this.cards[this.hoveredCardIndex]?.group.scale.set(1, 1, 1);
+    if (this.hoveredCardIndex !== null) this.cards[this.hoveredCardIndex]?.group.scale.setScalar(TABLE_CARD_SCALE);
     this.hoveredCardIndex = null;
   }
 
@@ -879,11 +881,12 @@ export class TableScene {
 
   private updateFoldFlap(entry: SceneCard, polygon: { x: number; y: number }[], linePoints: { x: number; y: number }[], width: number, height: number): void {
     if (polygon.length < 3 || this.squeezeProgress <= 0) {
-      entry.flapBack.geometry.setAttribute("position", new THREE.Float32BufferAttribute([], 3));
+      entry.foldedFace.geometry.setAttribute("position", new THREE.Float32BufferAttribute([], 3));
       this.updateRestingFinger(entry);
       return;
     }
     if (linePoints.length < 2) {
+      entry.foldedFace.geometry.setAttribute("position", new THREE.Float32BufferAttribute([], 3));
       this.updateRestingFinger(entry);
       return;
     }
@@ -907,9 +910,12 @@ export class TableScene {
         uvs.push((original.x + 0.575) / 1.15, (original.y + 0.85) / 1.7);
       }
     }
-    entry.flapBack.geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    entry.flapBack.geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    entry.flapBack.geometry.computeVertexNormals();
+    entry.foldedFace.geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    entry.foldedFace.geometry.setAttribute("uv", new THREE.Float32BufferAttribute(
+      uvs.map((value, index) => index % 2 === 0 ? 1 - value : value),
+      2,
+    ));
+    entry.foldedFace.geometry.computeVertexNormals();
     this.updateFinger(entry, lineStart, axis, angle);
   }
 
@@ -969,8 +975,7 @@ export class TableScene {
     entry.face.material.opacity = 0;
     entry.face.position.z = 0.14;
     entry.back.material.opacity = 1;
-    entry.flapBack.material.opacity = 1;
-    entry.flapFace.material.opacity = 1;
+    entry.foldedFace.material.opacity = 1;
     entry.finger.material.opacity = 1;
     const startedAt = performance.now();
     const settleFace = (now: number) => {
@@ -978,15 +983,13 @@ export class TableScene {
       const eased = 1 - (1 - progress) * (1 - progress);
       entry.face.material.opacity = eased;
       entry.back.material.opacity = 1 - eased;
-      entry.flapBack.material.opacity = 1 - eased;
-      entry.flapFace.material.opacity = 1 - eased;
+      entry.foldedFace.material.opacity = 1 - eased;
       entry.finger.material.opacity = 1 - eased;
       entry.face.position.z = THREE.MathUtils.lerp(0.14, -0.004, eased);
       if (progress < 1) requestAnimationFrame(settleFace);
       else {
         entry.back.visible = false;
-        entry.flapBack.visible = false;
-        entry.flapFace.visible = false;
+        entry.foldedFace.visible = false;
         entry.finger.visible = false;
         entry.face.material.transparent = false;
         entry.face.material.opacity = 1;
@@ -1080,16 +1083,6 @@ export class TableScene {
     return texture;
   }
 
-  private mirroredTexture(texture: THREE.Texture): THREE.Texture {
-    const mirrored = texture.clone();
-    mirrored.wrapS = THREE.RepeatWrapping;
-    mirrored.repeat.x = -1;
-    mirrored.offset.x = 1;
-    mirrored.needsUpdate = true;
-    this.textures.push(mirrored);
-    return mirrored;
-  }
-
   private resetCamera(): void {
     this.returnToTable();
   }
@@ -1098,7 +1091,12 @@ export class TableScene {
     const width = this.host.clientWidth || 900;
     const height = this.host.clientHeight || 620;
     this.camera.aspect = width / height;
-    const distanceScale = THREE.MathUtils.clamp(1.12 / this.camera.aspect, 1, 1.65);
+    const narrowScreen = width <= 580;
+    const distanceScale = narrowScreen
+      ? THREE.MathUtils.clamp(2.1 / Math.min(this.camera.aspect, 1), 2.1, 2.7)
+      : this.camera.aspect < 1
+        ? THREE.MathUtils.clamp(1.75 / this.camera.aspect, 1.65, 2.6)
+      : THREE.MathUtils.clamp(1.12 / this.camera.aspect, 1, 1.65);
     this.homeCameraPosition.set(0, 7.4 * distanceScale, 9.2 * distanceScale);
     this.homeCameraLookAt.set(0, 0, 0);
     if (!this.focusTarget && this.squeezeIndex === null) {

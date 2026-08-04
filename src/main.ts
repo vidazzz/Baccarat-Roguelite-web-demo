@@ -288,18 +288,20 @@ function beadRoadPanel(table: GameTable, interactive = false, columns = 9): stri
 function roadSheet(table: GameTable, compact = false, interactive = false, layout: "full" | "expanded" = "full"): string {
   const derived = makeDerivedRoads(table.history);
   const bead = beadRoadPanel(table, interactive);
-  const big = `<section class="big-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="big" title="点击标题栏对应列标记路数"` : ""}><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive, layout === "expanded" ? 30 : undefined)}</section>`;
+  const bigRoadPanel = (columns?: number) => `<section class="big-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="big" title="点击标题栏对应列标记路数"` : ""}><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive, columns)}</section>`;
+  const desktopBig = bigRoadPanel(layout === "expanded" ? 30 : undefined);
+  const mobileBig = bigRoadPanel(layout === "expanded" ? 18 : undefined);
   const derivedRoads = (derivedCompact: boolean) => `${derivedRoad(table, derived.bigEye, "大眼仔路", "big-eye", "big-eye", derivedCompact, interactive)}${derivedRoad(table, derived.small, "小路", "small", "small-road", derivedCompact, interactive)}${derivedRoad(table, derived.cockroach, "曱甴路", "cockroach", "cockroach-road", derivedCompact, interactive)}`;
-  const info = `<aside class="road-info-panel">${roadStats(table)}</aside>`;
+  const info = `<aside class="road-info-panel"><div class="road-stats-title">牌局结果</div>${roadStats(table)}</aside>`;
   const expandedClass = layout === "expanded" ? "expanded" : "";
   const desktopBead = layout === "expanded" ? beadRoadPanel(table, interactive, 10) : bead;
-  const mobileBead = layout === "expanded" ? beadRoadPanel(table, interactive, 30) : bead;
+  const mobileBead = layout === "expanded" ? beadRoadPanel(table, interactive, 18) : bead;
   const desktopRoadContent = layout === "expanded"
-    ? `${info}${desktopBead}${big}<div class="derived-grid">${derivedRoads(false)}</div>`
-    : `${desktopBead}${big}<div class="derived-grid">${derivedRoads(true)}</div>${info}`;
+    ? `${info}${desktopBead}${desktopBig}<div class="derived-grid">${derivedRoads(false)}</div>`
+    : `${desktopBead}${desktopBig}<div class="derived-grid">${derivedRoads(true)}</div>${info}`;
   const mobileRoadContent = layout === "expanded"
-    ? `${info}${mobileBead}${big}<div class="derived-grid">${derivedRoads(true)}</div>`
-    : `${mobileBead}${big}<div class="derived-grid">${derivedRoads(true)}</div>${info}`;
+    ? `${info}${mobileBead}${mobileBig}<div class="derived-grid">${derivedRoads(true)}</div>`
+    : `${mobileBead}${mobileBig}<div class="derived-grid">${derivedRoads(true)}</div>${info}`;
   return `<div class="road-sheet road-sheet-desktop ${compact ? "compact" : ""} ${expandedClass}"><div class="road-board">${desktopRoadContent}</div></div><div class="road-sheet road-sheet-mobile ${compact ? "compact" : ""} ${expandedClass}"><div class="mobile-road-stack">${mobileRoadContent}</div></div>`;
 }
 
@@ -682,7 +684,6 @@ function confidenceBreakdownView(pending: PendingRound): string {
 function dealingView(): string {
   const pending = game.pending ?? lastRound!;
   const table = game.table(tableId);
-  const probability = game.previewProbability(tableId);
   const sequence = dealSequence(pending);
   const isWatching = pending.bet === null;
   const result = dealStage === "settled" ? pending.result : null;
@@ -708,7 +709,6 @@ function dealingView(): string {
             ${dealStage === "settled" ? `<div class="table-settlement ${settlementKind}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭结算"><section class="settlement-verdict"><i>${settlementSeal}</i><span>本局 ${outcomeName(result!.outcome)}${result!.outcome === "tie" ? "局" : "家胜"}</span><b>${betFeedback}</b><strong>${settlementAmount}</strong>${pending.bet ? `<small>押${outcomeName(pending.bet.side)} · ${money(pending.bet.amount)}</small>` : ""}${lastSettlement?.income ? `<em>餐厅同期到账 +${money(lastSettlement.income)}</em>` : ""}</section><div class="settlement-hands"><div><span>庄家 · ${result!.bankerPoints} 点</span><strong>${result!.bankerCards.map(cardLabel).join(" · ")}</strong></div><div><span>闲家 · ${result!.playerPoints} 点</span><strong>${result!.playerCards.map(cardLabel).join(" · ")}</strong></div></div><small class="settlement-dismiss-hint">点击任意位置返回牌桌</small></div>` : ""}
           </div>
         </section>
-        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2><span class="pattern active">${probability.pattern.name}</span></div>${roadSheet(table)}</aside>
       </div>
     </section>
   `);
