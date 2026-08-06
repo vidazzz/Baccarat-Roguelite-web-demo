@@ -7,7 +7,7 @@ import mapDaylightAsset from "./map_daylight.jpg";
 import restaurantAsset from "./restaurant.jpg";
 import { cardFaceAsset } from "./card-assets";
 import { cardLabel, cardValue, confidenceRoadStartColumn, forecastBaccaratReveal, makeBeadPlate, makeBigRoad, makeDerivedRoads, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type DerivedRoadColor, type Outcome, type RoadBook, type RoundResult, type Side } from "./domain";
-import { casinos, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, inlineWatchSteps, skillDefinitions, type Casino, type DebugGameplayConfig, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
+import { casinos, DIVINE_CARD_TYPE_OPTIONS, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, inlineWatchSteps, skillDefinitions, type Casino, type DebugGameplayConfig, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
 import { cardRevealActor, composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, divineMashRetreatRatioPerMs, TableScene, unrevealedDealtCardIndices, type TableChip } from "./table-scene";
 
 type View = "map" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
@@ -1030,12 +1030,7 @@ function startDivineGame(index: number, target: Outcome): void {
 function chooseDivineCardType(index: number, target: Outcome): void {
   const overlay = document.createElement("div");
   overlay.className = "divine-choice-overlay";
-  const choices: { type: DivineCardType; label: string; detail: string }[] = [
-    { type: "face", label: "公", detail: "人头牌" }, { type: "no-edge", label: "没边", detail: "A" },
-    { type: "two-edge", label: "两边", detail: "2 · 3" }, { type: "three-edge", label: "三边", detail: "4 · 5 · 6" },
-    { type: "four-edge", label: "四边", detail: "7 · 8 · 9" },
-  ];
-  overlay.innerHTML = `<section><span>神助一阶段 · 锁定牌型</span><h2>这张牌，要什么？</h2><p>选定牌型后，以连点挤牌把它挤出来。</p><div>${choices.map((choice) => `<button data-divine-type="${choice.type}"><b>${choice.label}</b><small>${choice.detail}</small></button>`).join("")}</div></section>`;
+  overlay.innerHTML = `<section><span>神助一阶段 · 锁定牌型</span><h2>这张牌，要什么？</h2><p>选定牌型后，以连点挤牌把它挤出来。</p><div>${DIVINE_CARD_TYPE_OPTIONS.map((choice) => `<button data-divine-type="${choice.type}"><b>${choice.label}</b><small>${choice.detail}</small></button>`).join("")}</div></section>`;
   document.body.append(overlay);
   overlay.querySelectorAll<HTMLButtonElement>("[data-divine-type]").forEach((button) => button.addEventListener("click", () => {
     const type = button.dataset.divineType as DivineCardType;

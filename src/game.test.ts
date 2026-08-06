@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   BASE_CONFIDENCE,
+  divineCardTypeForRank,
   Game,
   LOBBY_ROUND_MS,
   RESTAURANT_CLOSING_MINUTE,
@@ -17,6 +18,16 @@ const historyRound = (outcome: RoundResult["outcome"], id: number): RoundResult 
   id, outcome, bankerCards: [{ rank: 7, suit: "spade" }, { rank: 2, suit: "heart" }],
   playerCards: [{ rank: 4, suit: "club" }, { rank: 3, suit: "diamond" }],
   bankerPoints: 9, playerPoints: 7, natural: true,
+});
+
+describe("Divine Assist card types", () => {
+  it("classifies every rank by its edge type", () => {
+    expect([1, 2, 3].map(divineCardTypeForRank)).toEqual(["no-edge", "no-edge", "no-edge"]);
+    expect([4, 5].map(divineCardTypeForRank)).toEqual(["two-edge", "two-edge"]);
+    expect([6, 7, 8].map(divineCardTypeForRank)).toEqual(["three-edge", "three-edge", "three-edge"]);
+    expect([9, 10].map(divineCardTypeForRank)).toEqual(["four-edge", "four-edge"]);
+    expect([11, 12, 13].map(divineCardTypeForRank)).toEqual(["face", "face", "face"]);
+  });
 });
 
 describe("real-time simulation", () => {

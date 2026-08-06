@@ -86,6 +86,22 @@ export interface SettlementResult {
 }
 
 export type DivineCardType = "face" | "no-edge" | "two-edge" | "three-edge" | "four-edge";
+export const DIVINE_CARD_TYPE_OPTIONS: readonly { type: DivineCardType; label: string; detail: string }[] = [
+  { type: "face", label: "公", detail: "J · Q · K" },
+  { type: "no-edge", label: "没边", detail: "A · 2 · 3" },
+  { type: "two-edge", label: "两边", detail: "4 · 5" },
+  { type: "three-edge", label: "三边", detail: "6 · 7 · 8" },
+  { type: "four-edge", label: "四边", detail: "9 · 10" },
+];
+
+export function divineCardTypeForRank(rank: number): DivineCardType {
+  if (rank >= 11) return "face";
+  if (rank <= 3) return "no-edge";
+  if (rank <= 5) return "two-edge";
+  if (rank <= 8) return "three-edge";
+  return "four-edge";
+}
+
 export type NextRoundEffect =
   | { kind: "forecast"; outcome: Outcome; chance: number }
   | { kind: "lose" }
@@ -471,7 +487,7 @@ export class Game {
     const candidates = legalRoundCardCandidates(this.pending.result, side, handIndex)
       .filter((candidate) => {
         const card = (side === "player" ? candidate.playerCards : candidate.bankerCards)[handIndex];
-        return card ? this.divineCardType(card.rank) === type : false;
+        return card ? divineCardTypeForRank(card.rank) === type : false;
       });
     if (!candidates.length) return false;
     Object.assign(this.pending.result, candidates[Math.min(Math.floor(this.rng.next() * candidates.length), candidates.length - 1)]!);
@@ -496,14 +512,6 @@ export class Game {
 
   setNextRoundEffect(effect: NextRoundEffect): void {
     this.nextRoundEffect = effect;
-  }
-
-  private divineCardType(rank: number): DivineCardType {
-    if (rank >= 10) return "face";
-    if (rank === 1) return "no-edge";
-    if (rank <= 3) return "two-edge";
-    if (rank <= 6) return "three-edge";
-    return "four-edge";
   }
 
   private forceRoundOutcome(result: RoundResult, target: Outcome): boolean {
