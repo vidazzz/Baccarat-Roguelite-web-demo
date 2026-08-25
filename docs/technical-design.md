@@ -146,6 +146,33 @@ src/
 
 ## 6. 核心数据模型
 
+当前连战和筹码账本使用以下领域状态：
+
+```ts
+interface PendingChain {
+  tableId: string;
+  stake: number;             // 现金等价值，实际由筹码锁定
+  plannedRounds: number;
+  legs: { index: number; target: Outcome; result: BaccaratResult }[];
+}
+
+interface GameWallet {
+  cash: number;
+  chips: number;
+  mudChips: number;
+}
+```
+
+连战确认时一次性扣除 `stake / 100` 枚可用筹码；每条 leg 只保存独立目标。结算统计和局并从指数 `K` 中排除，成功返还 `stake * 2 ** K` 现金，失败不返还。
+
+下注草稿由表现层维护连续目标数组：初始只渲染一行，选中第 `i` 行后自动追加第 `i + 1` 行，最多达到牌桌 `maxChainRounds`。同一目标再次点击时，仅当它位于最后一个已选目标才允许撤销，并同步裁剪后续空白行；取消操作清空整个草稿。筹码数量由单一滑块决定，确认时所有 leg 使用同一 `stake`。
+
+表现层为连战创建 N 个独立的 `TableScene` 容器。横屏使用 `repeat(N, minmax(0, 1fr))` 等分为单行并排布局，并随列宽压缩牌桌与播报；竖屏回退为单列以维持可操作面积。每个 leg 保存自己的发牌数量、公开牌集合、透视牌集合和神助状态，动画与输入互不打断。已结算 leg 禁用选择，显示胜/和徽章；等待出千的败局显示“危”状态。领域状态按 leg 独立结算，全部 leg 完成后才进行现金结算。
+
+千术目标选择不使用“当前牌局”作为领域前提。UI 选择千术后，为所有未结算 `TableScene` 标出合法目标；点击任意目标时将 `chainLegIndex` 传入 `Game.useCheatSkill()`，只更新目标 leg 的牌序与该场景。放弃按钮是全局操作，调用 `abandonPendingRound()` 结束整场连战。
+
+`TableScene` 使用俯视基准相机。透牌以独立 `peekMask` 覆盖蓝色半透明遮罩，`revealed` 状态仍为 `false`；开始咪牌或荷官翻牌时恢复牌背并隐藏遮罩，因此透视不改变发牌、计分、补牌或结算状态。
+
 以下接口用于说明边界，不是最终代码。
 
 ```ts
@@ -426,6 +453,8 @@ MVP 不制作完整赌场空间、荷官模型或真实手部动画。
 - 当前桌离开后正确释放几何体、材质、纹理引用和事件监听。
 
 ## 11. 餐厅与经济系统
+
+当前经济规则以筹码为赌场消费单位：现金不再直接购买筹码，餐厅周期使用等级概率产出筹码，餐厅抵押通过 `pawnDebtCash` 记录累计债务并允许重复抵押。赎回金额为债务的 2.5 倍。牌桌保存 `dealerCash` 与 `dealerRewardClaimed`，荷官资金初始并每日重置为 `¥10,000`，当天抵押奖励只触发一次。
 
 餐厅配置与状态分离：
 

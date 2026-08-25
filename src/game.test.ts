@@ -30,13 +30,103 @@ describe("Divine Assist card types", () => {
   });
 });
 
+describe("chain wagering and chip economy", () => {
+  it("locks one chip stake and settles independent targets with ties removed", () => {
+    const game = new Game();
+    const beforeChips = game.chips;
+    expect(game.reserveChainStake(300, "harbor-1")).toBe(true);
+    expect(game.chips).toBe(beforeChips - 3);
+    const pending = game.playChain("harbor-1", ["banker", "player", "banker"]);
+    pending.legs[0]!.result.outcome = "banker";
+    pending.legs[1]!.result.outcome = "tie";
+    pending.legs[2]!.result.outcome = "banker";
+    const settlement = game.settleChain();
+    expect(settlement.effectiveRounds).toBe(2);
+    expect(settlement.won).toBe(true);
+    expect(settlement.payout).toBe(300 * 4);
+    expect(game.cash).toBe(8000 + 1200);
+  });
+
+  it("loses the whole chain when one non-tie leg misses", () => {
+    const game = new Game();
+    game.reserveChainStake(200, "harbor-1");
+    const pending = game.playChain("harbor-1", ["banker", "player"]);
+    pending.legs[0]!.result.outcome = "banker";
+    pending.legs[1]!.result.outcome = "banker";
+    const settlement = game.settleChain();
+    expect(settlement.won).toBe(false);
+    expect(settlement.payout).toBe(0);
+    expect(game.cash).toBe(8000);
+  });
+
+  it("keeps the next leg pending until the current leg settles", () => {
+    const game = new Game();
+    game.reserveChainStake(200, "harbor-1");
+    const chain = game.playChain("harbor-1", ["banker", "player"]);
+    chain.legs[0]!.result.outcome = "banker";
+    chain.legs[1]!.result.outcome = "player";
+    const first = game.settle();
+    expect(first.chainContinues).toBe(true);
+    expect(game.pending).toBeNull();
+    expect(game.selectChainLeg(1)?.bet?.side).toBe("player");
+    const final = game.settle();
+    expect(final.chainCompleted).toBe(true);
+    expect(game.pending).toBeNull();
+  });
+
+  it("allows chain legs to settle in any order", () => {
+    const game = new Game();
+    game.reserveChainStake(200, "harbor-1");
+    const chain = game.playChain("harbor-1", ["banker", "player"]);
+    chain.legs[0]!.result.outcome = "banker";
+    chain.legs[1]!.result.outcome = "player";
+    game.selectChainLeg(1);
+    expect(game.settle().chainContinues).toBe(true);
+    expect(game.selectChainLeg(0)?.bet?.side).toBe("banker");
+    expect(game.settle().chainCompleted).toBe(true);
+  });
+
+  it("projects confirmed bet targets into the shared road sequence", () => {
+    const game = new Game();
+    game.setRoadCreationSequence("harbor-1", ["banker", "player"]);
+    expect(game.roadCreationSequence("harbor-1")).toEqual(["banker", "player"]);
+    expect(game.roadAnalysisHistory("harbor-1")).toHaveLength(game.table("harbor-1").history.length + 2);
+  });
+
+  it("supports repeated pawn lots with a redemption multiplier", () => {
+    const game = new Game();
+    const first = game.pawnRestaurantForChips();
+    const second = game.pawnRestaurantForChips();
+    expect(first).toBe(4);
+    expect(second).toBe(4);
+    expect(game.mudChips).toBe(8);
+    expect(game.restaurant.pawnDebtCash).toBe(800);
+    expect(game.redeemRestaurant()).toBe(true);
+    expect(game.cash).toBe(8000 - 2000);
+    expect(game.restaurant.pawnDebtCash).toBe(0);
+  });
+});
+
 describe("real-time simulation", () => {
+  it("rerolls each table's dealer collateral when a new day begins", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    const before = { kind: table.dealerRewardKind, chips: table.dealerRewardChips };
+    game.worldMinutes = 1440 - 1;
+    game.tickRealtime(Date.now() + 1000, null, false, false, false);
+    expect(table.dealerRewardClaimed).toBe(false);
+    expect(["chips", "cheat-skill"]).toContain(table.dealerRewardKind);
+    expect(table.dealerRewardChips).toBeGreaterThanOrEqual(3);
+    expect(table.dealerRewardChips).toBeLessThanOrEqual(10);
+    expect(before.kind === table.dealerRewardKind && before.chips === table.dealerRewardChips).toBe(false);
+  });
   it("pays restaurant income by elapsed time", () => {
     vi.spyOn(Date, "now").mockReturnValue(1_000);
     const game = new Game();
-    const before = game.cash;
+    const before = game.chips;
+    game.setDebugGameplayConfig({ restaurantIncomePerCycle: 1 });
     game.tickRealtime(1_000 + 1_000, null, false);
-    expect(game.cash).toBe(before + game.restaurantInfo().income);
+    expect(game.chips).toBe(before + 1);
     vi.restoreAllMocks();
   });
 
@@ -271,13 +361,13 @@ describe("debug gameplay configuration", () => {
   it("uses the configured restaurant payout and cycle duration", () => {
     vi.spyOn(Date, "now").mockReturnValue(1_000);
     const game = new Game();
-    const before = game.cash;
+    const before = game.chips;
     game.setDebugGameplayConfig({ restaurantIncomePerCycle: 125, restaurantCycleWorldMinutes: 30 });
 
     const tick = game.tickRealtime(2_000, null, false);
 
     expect(tick.income).toBe(250);
-    expect(game.cash).toBe(before + 250);
+    expect(game.chips).toBe(before + 250);
     expect(game.restaurant.cycleElapsedWorldMinutes).toBe(0);
     vi.restoreAllMocks();
   });
@@ -285,13 +375,13 @@ describe("debug gameplay configuration", () => {
   it("settles accumulated progress against a newly shortened cycle", () => {
     vi.spyOn(Date, "now").mockReturnValue(1_000);
     const game = new Game();
-    const before = game.cash;
+    const before = game.chips;
     game.restaurant.cycleElapsedWorldMinutes = 55;
     game.setDebugGameplayConfig({ restaurantIncomePerCycle: 100, restaurantCycleWorldMinutes: 20 });
 
     game.tickRealtime(2_000, null, false);
 
-    expect(game.cash).toBe(before + 500);
+    expect(game.chips).toBe(before + 500);
     expect(game.restaurant.cycleElapsedWorldMinutes).toBe(15);
     vi.restoreAllMocks();
   });
@@ -346,7 +436,7 @@ describe("debug gameplay configuration", () => {
     expect(game.debugBaseConfidence).toBe(BASE_CONFIDENCE);
     expect(game.debugConfidenceForced).toBe(false);
     expect(game.debugGameplayConfig).toEqual({
-      restaurantIncomePerCycle: 850,
+      restaurantIncomePerCycle: 1,
       restaurantCycleWorldMinutes: RESTAURANT_CYCLE_WORLD_MINUTES,
       worldMinutesPerRealSecondOutsideCasino: WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO,
       worldMinutesPerRealSecondInsideCasino: WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO,
@@ -495,6 +585,29 @@ describe("confidence settlement", () => {
     ]);
   });
 
+  it("treats a continuous chain wager as the projected road instead of the prior opposing road", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = [historyRound("banker", 0)];
+    game.setRoadCreationSequence(table.id, ["player", "player", "player", "player"]);
+
+    const pending = game.play(table.id, { side: "player", amount: 100 });
+
+    expect(pending.confidenceBreakdown.opposingPatterns.some((pattern) => pattern.id === "on-player-break")).toBe(false);
+    expect(pending.confidenceBreakdown.markedPatterns.some((pattern) => pattern.id === "on-player-connect")).toBe(true);
+  });
+
+  it("uses the road before the final chain target to judge whether that target matches", () => {
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = [historyRound("banker", 0), historyRound("player", 1), historyRound("banker", 2), historyRound("player", 3), historyRound("banker", 4), historyRound("player", 5)];
+    game.setRoadCreationSequence(table.id, ["banker", "player"]);
+
+    const pending = game.play(table.id, { side: "player", amount: 100 });
+
+    expect(pending.confidenceBreakdown.opposingPatterns.some((pattern) => pattern.id === "single-jump")).toBe(false);
+  });
+
   it("replaces an earlier created result and removes every result after it", () => {
     const game = new Game();
     const table = game.table("harbor-1");
@@ -626,7 +739,7 @@ describe("confidence settlement", () => {
     expect(table.historyOffset).toBe(13);
   });
 
-  it("includes a marked lower-road pattern in confidence settlement", () => {
+  it("ignores lower-road marks in confidence settlement", () => {
     const game = new Game();
     const table = game.table("harbor-1");
     const sequence = "BBBBPPPPPBBBBPBBPPPBBPBBBPBPPBBPPBBBBPPBBBBBPBBPBPBPBPBP";
@@ -636,11 +749,11 @@ describe("confidence settlement", () => {
 
     const pending = game.play(table.id, { side: "banker", amount: 100 });
 
-    expect(pending.confidenceBreakdown.markedPatterns.some((pattern) => pattern.source === "small")).toBe(true);
-    expect(pending.confidenceBreakdown.markedPatternBonus).toBeGreaterThan(0);
+    expect(pending.confidenceBreakdown.markedPatterns.some((pattern) => pattern.source === "small")).toBe(false);
+    expect(pending.confidenceBreakdown.markedPatternBonus).toBe(0);
   });
 
-  it("requires an exact lower-road start column instead of accepting an earlier column", () => {
+  it("keeps lower-road marks out of the active rule set", () => {
     const game = new Game();
     const table = game.table("harbor-1");
     const sequence = "BBBBPPPPPBBBBPBBPPPBBPBBBPBPPBBPPBBBBPPBBBBBPBBPBPBPBPBP";
@@ -652,7 +765,7 @@ describe("confidence settlement", () => {
     expect(game.markedRoadPatterns(table.id).some((pattern) => pattern.source === "small")).toBe(false);
 
     game.markRoad(table.id, "small", exactStart, 0);
-    expect(game.markedRoadPatterns(table.id).some((pattern) => pattern.source === "small")).toBe(true);
+    expect(game.markedRoadPatterns(table.id).some((pattern) => pattern.source === "small")).toBe(false);
   });
 
   it("requires the exact big-road suffix column instead of accepting the first column", () => {
@@ -765,6 +878,16 @@ describe("confidence settlement", () => {
     expect(game.shouldTriggerDivineAssist()).toBe(true);
   });
 
+  it("never triggers Divine Assist when confidence is zero", () => {
+    const game = new Game();
+    const pending = game.play("harbor-1", { side: "banker", amount: 100 });
+    pending.result.outcome = "player";
+
+    expect(game.confidence).toBe(0);
+    expect(game.divineAssistProbability()).toBe(0);
+    expect(game.shouldTriggerDivineAssist()).toBe(false);
+  });
+
   it("does not change Divine Assist effect probabilities when confidence is forced to 100%", () => {
     const game = new Game();
     game.play("harbor-1", { side: "banker", amount: 100 });
@@ -822,5 +945,20 @@ describe("confidence settlement", () => {
     expect(game.upgradeSkill("long-banker")).toBe(true);
     expect(game.skills["long-banker"]).toBe(3);
     expect(game.cash).toBe(5600);
+  });
+});
+
+describe("round surrender", () => {
+  it("abandons an active round without refunding the consumed chips", () => {
+    const game = new Game();
+    expect(game.reserveChipBet(100)).toBe(true);
+    game.play("harbor-1", { side: "banker", amount: 100 });
+    expect(game.availableChips).toBe(9);
+
+    game.abandonPendingRound();
+
+    expect(game.pending).toBeNull();
+    expect(game.pendingChain).toBeNull();
+    expect(game.availableChips).toBe(9);
   });
 });

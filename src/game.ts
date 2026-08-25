@@ -1,6 +1,7 @@
 import {
   createRng,
   cardValue,
+  handPoints,
   generateInfluencedRound,
   probabilityFor,
   type PatternId,
@@ -12,7 +13,6 @@ import {
   type RoadBook,
   type ConfidenceRoadPattern,
   recognizeConfidenceRoads,
-  recognizeDerivedConfidenceRoads,
   confidenceRoadStartColumn,
   legalRoundCardCandidates,
   retargetRoundCard,
@@ -26,16 +26,23 @@ export interface Casino {
   entryFee: number;
   minBet: number;
   maxBet: number;
+  maxChainRounds: number;
+  dealerCash: number;
   tone: "jade" | "crimson";
 }
 
 export interface GameTable {
   id: string;
   name: string;
+  dealerName: string;
+  dealerRewardKind: "chips" | "cheat-skill";
+  dealerRewardChips: number;
   history: RoundResult[];
   historyOffset: number;
   round: number;
   realtimeElapsedMs: number;
+  dealerCash: number;
+  dealerRewardClaimed: boolean;
 }
 
 export interface Restaurant {
@@ -44,6 +51,7 @@ export interface Restaurant {
   pawned: boolean;
   open: boolean;
   closeAtWorldMinute: number;
+  pawnDebtCash: number;
 }
 
 export interface DebugGameplayConfig {
@@ -64,6 +72,39 @@ export interface PendingRound {
   confidencePrediction: Side | null;
   confidenceBreakdown: ConfidenceBreakdown;
   createdRoadPrediction: Side | null;
+  betCurrency?: "cash" | "chip";
+}
+
+export interface ChainLeg {
+  index: number;
+  target: Outcome;
+  result: RoundResult;
+  settled: boolean;
+}
+
+export interface PendingChain {
+  tableId: string;
+  stake: number;
+  plannedRounds: number;
+  legs: ChainLeg[];
+  currentLegIndex: number;
+}
+
+export interface ChainSettlementResult {
+  stake: number;
+  plannedRounds: number;
+  effectiveRounds: number;
+  ties: number;
+  won: boolean;
+  payout: number;
+  dealerCashAfter: number;
+  dealerReward: DealerReward | null;
+}
+
+export interface DealerReward {
+  kind: "chips" | "cheat-skill";
+  amount?: number;
+  skillId?: CheatSkillId;
 }
 
 export interface RoadMark {
@@ -83,6 +124,10 @@ export interface SettlementResult {
   delta: number;
   income: number;
   roadCreation: RoadCreationResolution | null;
+  dealerReward?: DealerReward | null;
+  chainContinues?: boolean;
+  chainCompleted?: boolean;
+  chainIndex?: number;
 }
 
 export type DivineCardType = "face" | "no-edge" | "two-edge" | "three-edge" | "four-edge";
@@ -142,6 +187,24 @@ export function inlineWatchSteps(result: RoundResult): InlineWatchStep[] {
 
 export type SkillId = Exclude<PatternId, "none">;
 
+export type CheatSkillId = "peek-covered" | "swap-covered" | "set-edge" | "redraw-face-up" | "swap-face-up";
+const cheatEdgeTypes: DivineCardType[] = ["face", "no-edge", "two-edge", "three-edge", "four-edge"];
+
+export interface CheatSkillDefinition {
+  id: CheatSkillId;
+  name: string;
+  timing: "covered" | "face-up";
+  description: string;
+}
+
+export const cheatSkillDefinitions: readonly CheatSkillDefinition[] = [
+  { id: "peek-covered", name: "透牌", timing: "covered", description: "查看盖牌牌面，但牌仍保持盖牌状态。" },
+  { id: "swap-covered", name: "调牌", timing: "covered", description: "交换己方前两张盖牌的顺序。" },
+  { id: "set-edge", name: "定边", timing: "covered", description: "将盖牌重新抽为指定边数类型。" },
+  { id: "redraw-face-up", name: "重抽", timing: "face-up", description: "重新抽取当前明牌，并重新计算牌局结果。" },
+  { id: "swap-face-up", name: "换牌", timing: "face-up", description: "交换己方前两张明牌的顺序。" },
+];
+
 export interface SkillDefinition {
   id: SkillId;
   name: string;
@@ -151,8 +214,8 @@ export interface SkillDefinition {
 }
 
 export const casinos: Casino[] = [
-  { id: "harbor", name: "海湾娱乐城", subtitle: "低注码 · 四桌常开", tableCount: 4, entryFee: 100, minBet: 100, maxBet: 2000, tone: "jade" },
-  { id: "grand", name: "金殿贵宾厅", subtitle: "高注码 · 六桌竞逐", tableCount: 6, entryFee: 1000, minBet: 1000, maxBet: 20000, tone: "crimson" },
+  { id: "harbor", name: "海湾娱乐城", subtitle: "低注码 · 四桌常开", tableCount: 4, entryFee: 100, minBet: 100, maxBet: 2000, maxChainRounds: 3, dealerCash: 10_000, tone: "jade" },
+  { id: "grand", name: "金殿贵宾厅", subtitle: "高注码 · 六桌竞逐", tableCount: 6, entryFee: 1000, minBet: 1000, maxBet: 20_000, maxChainRounds: 5, dealerCash: 10_000, tone: "crimson" },
 ];
 
 export const LOBBY_ROUND_MS = 8_000;
@@ -180,14 +243,14 @@ export const skillDefinitions: SkillDefinition[] = [
 ];
 
 const restaurantLevels = [
-  { cost: 0, income: 400, pawn: 4000 },
-  { cost: 3000, income: 850, pawn: 6500 },
-  { cost: 8000, income: 1800, pawn: 12000 },
-  { cost: 18000, income: 3800, pawn: 22000 },
+  { cost: 0, income: 400, chipChance: 0.35, chipsOnSuccess: 1, pawn: 4000 },
+  { cost: 3000, income: 850, chipChance: 0.52, chipsOnSuccess: 1, pawn: 6500 },
+  { cost: 8000, income: 1800, chipChance: 0.68, chipsOnSuccess: 2, pawn: 12000 },
+  { cost: 18000, income: 3800, chipChance: 0.82, chipsOnSuccess: 3, pawn: 22000 },
 ];
 
 const defaultDebugGameplayConfig = (): DebugGameplayConfig => ({
-  restaurantIncomePerCycle: restaurantLevels[0]!.income,
+  restaurantIncomePerCycle: restaurantLevels[0]!.chipsOnSuccess,
   restaurantCycleWorldMinutes: RESTAURANT_CYCLE_WORLD_MINUTES,
   worldMinutesPerRealSecondOutsideCasino: WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO,
   worldMinutesPerRealSecondInsideCasino: WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO,
@@ -197,7 +260,9 @@ const defaultDebugGameplayConfig = (): DebugGameplayConfig => ({
 
 export class Game {
   cash = 8000;
-  restaurant: Restaurant = { level: 1, cycleElapsedWorldMinutes: 0, pawned: false, open: true, closeAtWorldMinute: RESTAURANT_CLOSING_MINUTE };
+  chips = 10;
+  mudChips = 0;
+  restaurant: Restaurant = { level: 1, cycleElapsedWorldMinutes: 0, pawned: false, open: true, closeAtWorldMinute: RESTAURANT_CLOSING_MINUTE, pawnDebtCash: 0 };
   worldMinutes = 18 * 60;
   skills: Record<PatternId, number> = { "long-banker": 2, "long-player": 1, "ping-pong": 1, none: 0 };
   equippedSkill: SkillId | null = "long-banker";
@@ -206,6 +271,7 @@ export class Game {
   debugBaseConfidence = BASE_CONFIDENCE;
   tables = new Map<string, GameTable>();
   pending: PendingRound | null = null;
+  pendingChain: PendingChain | null = null;
   nextRoundEffect: NextRoundEffect | null = null;
   sleepDebtWorldMinutes = 0;
   sleepDeprivationCollapseAtWorldMinute: number | null = null;
@@ -215,21 +281,115 @@ export class Game {
   private rng: Rng = createRng(20260729);
   private lastRealtimeAt = Date.now();
   private reservedWager = 0;
+  private reservedChipWager = 0;
   private roadMarks = new Map<string, RoadMark>();
   private roadCreations = new Map<string, Side[]>();
   private roundWinStreak = 0;
   private dailyBetProfit = new Map<number, number>();
   private debugRestaurantIncomeOverride: number | null = null;
   private debugGameplay = defaultDebugGameplayConfig();
+  private dailyCheatSkills: CheatSkillId[] = [];
 
   constructor() {
+    const dealerNames = ["阿成", "老K", "阿兰", "陈叔", "小杜", "梅姐"];
     for (const casino of casinos) {
       for (let index = 0; index < casino.tableCount; index += 1) {
-        const table: GameTable = { id: `${casino.id}-${index + 1}`, name: `${String(index + 1).padStart(2, "0")} 号桌`, history: [], historyOffset: 0, round: 0, realtimeElapsedMs: index * 900 };
+        const tableNumber = index + 1;
+        const table: GameTable = { id: `${casino.id}-${tableNumber}`, name: `${String(tableNumber).padStart(2, "0")} 号桌`, dealerName: dealerNames[(index + (casino.id === "grand" ? 2 : 0)) % dealerNames.length]!, dealerRewardKind: "chips", dealerRewardChips: 3, history: [], historyOffset: 0, round: 0, realtimeElapsedMs: index * 900, dealerCash: casino.dealerCash, dealerRewardClaimed: false };
+        this.refreshDealerReward(table, 1);
         for (let round = 0; round < 14 + index; round += 1) this.advanceTable(table);
         this.tables.set(table.id, table);
       }
     }
+    this.rollDailyCheatSkills();
+  }
+
+  get availableCheatSkills(): readonly CheatSkillId[] {
+    return this.dailyCheatSkills;
+  }
+
+  rollDailyCheatSkills(): CheatSkillId[] {
+    const pool = cheatSkillDefinitions.map((definition) => definition.id);
+    const selected: CheatSkillId[] = [];
+    while (selected.length < 2 && pool.length) {
+      const index = Math.min(pool.length - 1, Math.floor(this.rng.next() * pool.length));
+      selected.push(pool.splice(index, 1)[0]!);
+    }
+    this.dailyCheatSkills = selected;
+    return [...selected];
+  }
+
+  grantTemporaryCheatSkill(): CheatSkillId {
+    const available = cheatSkillDefinitions.map((definition) => definition.id).filter((id) => !this.dailyCheatSkills.includes(id));
+    const skill = available[Math.min(available.length - 1, Math.floor(this.rng.next() * available.length))] ?? this.dailyCheatSkills[0]!;
+    if (!this.dailyCheatSkills.includes(skill)) this.dailyCheatSkills.push(skill);
+    return skill;
+  }
+
+  useCheatSkill(skillId: CheatSkillId, side: Side, handIndex = 0, chainLegIndex: number | null = null): boolean {
+    if ((!this.pending && !this.pendingChain) || !this.dailyCheatSkills.includes(skillId) || !this.consumeChips(1)) return false;
+    const targetResult = this.pendingChain && chainLegIndex !== null
+      ? this.pendingChain.legs[chainLegIndex]?.result
+      : this.pending?.result;
+    const targetLeg = this.pendingChain && chainLegIndex !== null
+      ? this.pendingChain.legs[chainLegIndex]
+      : null;
+    if (!targetResult || targetLeg?.settled) {
+      this.refundChips(1);
+      return false;
+    }
+    const hand = side === "player" ? targetResult.playerCards : targetResult.bankerCards;
+    if (!hand[handIndex]) {
+      this.refundChips(1);
+      return false;
+    }
+    if (skillId === "swap-covered" || skillId === "swap-face-up") {
+      if (hand.length < 2) {
+        this.refundChips(1);
+        return false;
+      }
+      [hand[0], hand[1]] = [hand[1]!, hand[0]!];
+      targetResult.playerPoints = handPoints(targetResult.playerCards);
+      targetResult.bankerPoints = handPoints(targetResult.bankerCards);
+      targetResult.outcome = targetResult.playerPoints === targetResult.bankerPoints
+        ? "tie"
+        : targetResult.bankerPoints > targetResult.playerPoints ? "banker" : "player";
+    }
+    if (skillId === "redraw-face-up") {
+      const candidates = legalRoundCardCandidates(targetResult, side, handIndex);
+      const replacement = candidates[Math.min(candidates.length - 1, Math.floor(this.rng.next() * candidates.length))];
+      if (!replacement) {
+        this.refundChips(1);
+        return false;
+      }
+      Object.assign(targetResult, replacement);
+    }
+    if (skillId === "set-edge") {
+      const desiredType = cheatEdgeTypes[Math.floor(this.rng.next() * cheatEdgeTypes.length)]!;
+      const candidates = legalRoundCardCandidates(targetResult, side, handIndex)
+        .filter((candidate) => {
+          const card = (side === "player" ? candidate.playerCards : candidate.bankerCards)[handIndex];
+          return card && divineCardTypeForRank(card.rank) === desiredType;
+        });
+      const replacement = candidates[Math.min(candidates.length - 1, Math.floor(this.rng.next() * candidates.length))];
+      if (!replacement) {
+        this.refundChips(1);
+          return false;
+        }
+      Object.assign(targetResult, replacement);
+    }
+    return true;
+  }
+
+  private grantDealerReward(table: GameTable): DealerReward | null {
+    if (table.dealerRewardClaimed || table.dealerCash > 0) return null;
+    table.dealerRewardClaimed = true;
+    if (table.dealerRewardKind === "chips") {
+      const amount = table.dealerRewardChips;
+      this.chips += amount;
+      return { kind: "chips", amount };
+    }
+    return { kind: "cheat-skill", skillId: this.grantTemporaryCheatSkill() };
   }
 
   table(id: string): GameTable {
@@ -246,12 +406,93 @@ export class Game {
     return true;
   }
 
+  enterCasinoWithChips(casinoId: string): boolean {
+    const casino = casinos.find((item) => item.id === casinoId);
+    const feeChips = casino ? Math.ceil(casino.entryFee / 100) : Number.POSITIVE_INFINITY;
+    if (!casino || !this.consumeChips(feeChips)) return false;
+    this.notice = `已支付 ${casino.name} 门票 · ${feeChips} 枚筹码`;
+    return true;
+  }
+
+  resetDealerFunds(): void {
+    const day = this.worldTimeInfo().day;
+    for (const table of this.tables.values()) {
+      const casino = casinos.find((item) => table.id.startsWith(`${item.id}-`));
+      if (casino) {
+        table.dealerCash = casino.dealerCash;
+        table.dealerRewardClaimed = false;
+        this.refreshDealerReward(table, day);
+      }
+    }
+  }
+
+  private refreshDealerReward(table: GameTable, day: number): void {
+    const seed = [...table.id].reduce((total, character) => total + character.charCodeAt(0), day * 31);
+    table.dealerRewardKind = seed % 2 === 0 ? "chips" : "cheat-skill";
+    table.dealerRewardChips = 3 + ((seed * 13) % 8);
+  }
+
   previewProbability(tableId: string): ProbabilityInfo {
     return probabilityFor(this.table(tableId).history, { "long-banker": 0, "long-player": 0, "ping-pong": 0, none: 0 });
   }
 
   get reservedBetAmount(): number {
-    return this.reservedWager;
+    return this.reservedWager || this.reservedChipWager;
+  }
+
+  get reservedChainStake(): number {
+    return this.reservedChipWager;
+  }
+
+  get availableChips(): number {
+    return this.chips + this.mudChips;
+  }
+
+  private consumeChips(count: number): boolean {
+    if (!Number.isInteger(count) || count < 0 || this.availableChips < count) return false;
+    const mudUsed = Math.min(this.mudChips, count);
+    this.mudChips -= mudUsed;
+    this.chips -= count - mudUsed;
+    return true;
+  }
+
+  private refundChips(count: number): void {
+    this.chips += Math.max(0, Math.floor(count));
+  }
+
+  reserveChainStake(amount: number, tableId: string): boolean {
+    const table = this.table(tableId);
+    const casino = casinos.find((item) => table.id.startsWith(`${item.id}-`));
+    if (!casino || this.pending || this.pendingChain || this.reservedWager > 0 || this.reservedChipWager > 0) return false;
+    if (!Number.isInteger(amount) || amount < casino.minBet || amount > casino.maxBet || amount % 100 !== 0) return false;
+    const chipCount = amount / 100;
+    if (!this.consumeChips(chipCount)) return false;
+    this.reservedChipWager = amount;
+    return true;
+  }
+
+  reserveChipBet(amount: number): boolean {
+    if (this.pending || this.pendingChain || this.reservedWager > 0 || this.reservedChipWager > 0) return false;
+    if (!Number.isInteger(amount) || amount <= 0 || amount % 100 !== 0) return false;
+    const chipCount = amount / 100;
+    if (!this.consumeChips(chipCount)) return false;
+    this.reservedChipWager = amount;
+    return true;
+  }
+
+  addReservedChipBet(amount: number): boolean {
+    if (this.pending || this.pendingChain || this.reservedChipWager <= 0) return false;
+    if (!Number.isInteger(amount) || amount <= 0 || amount % 100 !== 0 || !this.consumeChips(amount / 100)) return false;
+    this.reservedChipWager += amount;
+    return true;
+  }
+
+  cancelReservedChainStake(): number {
+    if (this.pendingChain || this.reservedChipWager <= 0) return 0;
+    const amount = this.reservedChipWager;
+    this.refundChips(amount / 100);
+    this.reservedChipWager = 0;
+    return amount;
   }
 
   reserveBetChip(amount: number): boolean {
@@ -262,34 +503,171 @@ export class Game {
   }
 
   cancelReservedBet(): number {
-    if (this.pending || this.reservedWager <= 0) return 0;
+    if (this.pending || (this.reservedWager <= 0 && this.reservedChipWager <= 0)) return 0;
+    if (this.reservedChipWager > 0) {
+      const refund = this.reservedChipWager;
+      this.refundChips(refund / 100);
+      this.reservedChipWager = 0;
+      return refund;
+    }
     const refund = this.reservedWager;
     this.reservedWager = 0;
     this.cash += refund;
     return refund;
   }
 
-  play(tableId: string, bet: { side: Outcome; amount: number } | null): PendingRound {
-    if (this.pending) throw new Error("A round is already pending");
+  playChain(tableId: string, targets: Outcome[]): PendingChain {
+    if (this.pending || this.pendingChain) throw new Error("A round is already pending");
     const table = this.table(tableId);
+    const casino = casinos.find((item) => table.id.startsWith(`${item.id}-`));
+    if (!casino) throw new Error("Unknown casino");
+    const stake = this.reservedChipWager;
+    if (!stake) throw new Error("请先暂存连战筹码");
+    if (!targets.length || targets.length > casino.maxChainRounds) throw new Error("连战局数无效");
+    if (targets.some((target) => target !== "banker" && target !== "player" && target !== "tie")) throw new Error("下注目标无效");
+    const legs: ChainLeg[] = [];
+    let projectedHistory = table.history;
+    for (let index = 0; index < targets.length; index += 1) {
+      const generated = generateInfluencedRound(this.rng, table.round + index + 1, projectedHistory, { "long-banker": 0, "long-player": 0, "ping-pong": 0, none: 0 });
+      legs.push({ index, target: targets[index]!, result: generated.result, settled: false });
+      projectedHistory = [...projectedHistory, generated.result];
+    }
+    this.reservedChipWager = 0;
+    this.pendingChain = { tableId, stake, plannedRounds: targets.length, legs, currentLegIndex: 0 };
+    this.pending = this.pendingRoundForChainLeg(this.pendingChain, legs[0]!);
+    this.confidence = this.debugConfidenceForced ? 1 : this.pending.confidence;
+    return this.pendingChain;
+  }
+
+  selectChainLeg(index: number): PendingRound | null {
+    const chain = this.pendingChain;
+    if (!chain || !Number.isInteger(index) || index < 0 || index >= chain.legs.length) return null;
+    const leg = chain.legs[index]!;
+    if (leg.settled) return null;
+    chain.currentLegIndex = index;
+    this.pending = this.pendingRoundForChainLeg(chain, leg);
+    this.confidence = this.debugConfidenceForced ? 1 : this.pending.confidence;
+    return this.pending;
+  }
+
+  private pendingRoundForChainLeg(chain: PendingChain, leg: ChainLeg): PendingRound {
+    const table = this.table(chain.tableId);
+    const probability = probabilityFor(table.history, { "long-banker": 0, "long-player": 0, "ping-pong": 0, none: 0 });
+    const breakdown = this.calculateConfidence(chain.tableId, { side: leg.target, amount: chain.stake }, this.cash);
+    return {
+      tableId: chain.tableId,
+      result: leg.result,
+      probability,
+      bet: { side: leg.target, amount: chain.stake },
+      confidence: this.debugConfidenceForced ? 1 : breakdown.total,
+      confidencePrediction: null,
+      confidenceBreakdown: breakdown,
+      createdRoadPrediction: null,
+      betCurrency: "chip",
+    };
+  }
+
+  private settleChainLeg(): SettlementResult {
+    const chain = this.pendingChain!;
+    const leg = chain.legs[chain.currentLegIndex]!;
+    const table = this.table(chain.tableId);
+    if (leg.settled) throw new Error("This chain leg is already settled");
+    table.history.push(leg.result);
+    table.round += 1;
+    this.trimTableHistory(table);
+    leg.settled = true;
+    const tie = leg.result.outcome === "tie";
+    const won = tie || leg.result.outcome === leg.target;
+    const planned = this.roadCreation(chain.tableId);
+    if (planned) {
+      const remaining = this.roadCreationSequence(chain.tableId).slice(1);
+      if (leg.result.outcome !== planned) this.roadCreations.delete(chain.tableId);
+      else if (remaining.length) this.roadCreations.set(chain.tableId, remaining);
+      else this.roadCreations.delete(chain.tableId);
+    }
+    if (!won) {
+      this.pending = null;
+      this.pendingChain = null;
+      this.roundWinStreak = 0;
+      return { delta: 0, income: 0, roadCreation: null, chainCompleted: true, chainIndex: leg.index, dealerReward: null };
+    }
+    if (!chain.legs.every((item) => item.settled)) {
+      this.pending = null;
+      return { delta: 0, income: 0, roadCreation: null, chainContinues: true, chainIndex: leg.index, dealerReward: null };
+    }
+    const ties = chain.legs.filter((item) => item.result.outcome === "tie").length;
+    const effectiveRounds = chain.plannedRounds - ties;
+    const payout = chain.stake * (2 ** effectiveRounds);
+    this.cash += payout;
+    table.dealerCash = Math.max(0, table.dealerCash - payout);
+    const dealerReward = this.grantDealerReward(table);
+    this.pending = null;
+    this.pendingChain = null;
+    this.roundWinStreak += 1;
+    return { delta: payout, income: 0, roadCreation: null, chainCompleted: true, chainIndex: leg.index, dealerReward };
+  }
+
+  settleChain(): ChainSettlementResult {
+    if (!this.pendingChain) throw new Error("No pending chain");
+    const pending = this.pendingChain;
+    const table = this.table(pending.tableId);
+    let ties = 0;
+    let won = true;
+    for (const leg of pending.legs) {
+      table.history.push(leg.result);
+      table.round += 1;
+      if (leg.result.outcome === "tie") {
+        ties += 1;
+        continue;
+      }
+      if (leg.result.outcome !== leg.target) won = false;
+    }
+    this.trimTableHistory(table);
+    const effectiveRounds = pending.plannedRounds - ties;
+    const payout = won ? pending.stake * (2 ** effectiveRounds) : 0;
+    if (payout > 0) {
+      this.cash += payout;
+      table.dealerCash = Math.max(0, table.dealerCash - payout);
+    }
+    const dealerReward = this.grantDealerReward(table);
+    this.pending = null;
+    this.pendingChain = null;
+    return { stake: pending.stake, plannedRounds: pending.plannedRounds, effectiveRounds, ties, won, payout, dealerCashAfter: table.dealerCash, dealerReward };
+  }
+
+  abandonPendingRound(): void {
+    this.pending = null;
+    this.pendingChain = null;
+    this.reservedWager = 0;
+    this.reservedChipWager = 0;
+  }
+
+  play(tableId: string, bet: { side: Outcome; amount: number } | null): PendingRound {
+    if (this.pending || this.pendingChain) throw new Error("A round is already pending");
+    const table = this.table(tableId);
+    const chipBet = this.reservedChipWager > 0;
     const liquidAssetsBeforeBet = this.cash + this.reservedWager;
     if (bet) {
       if (!Number.isFinite(bet.amount) || bet.amount <= 0) throw new Error("下注金额无效");
-      if (this.reservedWager > 0) {
+      if (chipBet) {
+        if (bet.amount !== this.reservedChipWager) throw new Error("确认金额与暂存筹码不一致");
+        this.reservedChipWager = 0;
+      } else if (this.reservedWager > 0) {
         if (bet.amount !== this.reservedWager) throw new Error("确认金额与暂存筹码不一致");
         this.reservedWager = 0;
       } else {
         if (bet.amount > this.cash) throw new Error("现金不足");
         this.cash -= bet.amount;
       }
-    } else if (this.reservedWager > 0) {
+    } else if (this.reservedWager > 0 || this.reservedChipWager > 0) {
       throw new Error("旁观前需取消暂存筹码");
     }
     const generated = generateInfluencedRound(this.rng, table.round + 1, table.history, { "long-banker": 0, "long-player": 0, "ping-pong": 0, none: 0 });
     this.applyNextRoundEffect(generated.result, bet);
     const breakdown = this.calculateConfidence(tableId, bet, liquidAssetsBeforeBet);
     this.confidence = this.debugConfidenceForced ? 1 : breakdown.total;
-    const prediction = breakdown.markedPatterns.find((pattern) => pattern.prediction === bet?.side)?.prediction ?? null;
+    const predictionTarget = this.roadCreationSequence(tableId).at(-1) ?? (bet?.side === "banker" || bet?.side === "player" ? bet.side : null);
+    const prediction = breakdown.markedPatterns.find((pattern) => pattern.prediction === predictionTarget)?.prediction ?? null;
     this.pending = {
       tableId,
       ...generated,
@@ -298,6 +676,7 @@ export class Game {
       confidencePrediction: prediction,
       confidenceBreakdown: breakdown,
       createdRoadPrediction: this.roadCreation(tableId),
+      betCurrency: bet ? (chipBet ? "chip" : "cash") : undefined,
     };
     return this.pending;
   }
@@ -312,6 +691,14 @@ export class Game {
     if (side) this.roadCreations.set(tableId, [side]);
     else this.roadCreations.delete(tableId);
     return side;
+  }
+
+  setRoadCreationSequence(tableId: string, sides: readonly Side[]): Side[] {
+    this.table(tableId);
+    const sequence = sides.filter((side): side is Side => side === "banker" || side === "player");
+    if (sequence.length) this.roadCreations.set(tableId, [...sequence]);
+    else this.roadCreations.delete(tableId);
+    return [...sequence];
   }
 
   roadCreationSequence(tableId: string): Side[] {
@@ -400,12 +787,6 @@ export class Game {
     if (bigMark && bigStart !== null && bigMark.startColumn === bigStart) {
       patterns.push(...recognizeConfidenceRoads(history, "big"));
     }
-    for (const roadBook of ["big-eye", "small", "cockroach"] as const) {
-      const mark = this.roadMark(tableId, roadBook);
-      const exactStart = confidenceRoadStartColumn(history, roadBook);
-      if (!mark || exactStart === null || mark.startColumn !== exactStart) continue;
-      patterns.push(...recognizeDerivedConfidenceRoads(history, roadBook, 0));
-    }
     return this.uniqueRoadPatterns(patterns);
   }
 
@@ -414,9 +795,6 @@ export class Game {
     return this.uniqueRoadPatterns([
       ...recognizeConfidenceRoads(history, "bead"),
       ...recognizeConfidenceRoads(history, "big"),
-      ...recognizeDerivedConfidenceRoads(history, "big-eye"),
-      ...recognizeDerivedConfidenceRoads(history, "small"),
-      ...recognizeDerivedConfidenceRoads(history, "cockroach"),
     ]);
   }
 
@@ -431,11 +809,22 @@ export class Game {
   }
 
   private calculateConfidence(tableId: string, bet: { side: Outcome; amount: number } | null, liquidAssetsBeforeBet: number): ConfidenceBreakdown {
-    const markedPatterns = this.markedRoadPatterns(tableId);
-    const allPatterns = this.allRoadPatterns(tableId);
+    const plannedSequence = this.roadCreationSequence(tableId);
+    const projectedHistory = this.roadAnalysisHistory(tableId);
+    // 路数用于预测下一步，当前规划的最后一注只作为相合目标，不能先参与预测自身。
+    const patternHistory = plannedSequence.length ? projectedHistory.slice(0, -1) : projectedHistory;
+    const projectedPatterns = plannedSequence.length
+      ? this.uniqueRoadPatterns([
+        ...recognizeConfidenceRoads(patternHistory, "bead"),
+        ...recognizeConfidenceRoads(patternHistory, "big"),
+      ])
+      : [];
+    const markedPatterns = plannedSequence.length ? projectedPatterns : this.markedRoadPatterns(tableId);
+    const allPatterns = plannedSequence.length ? projectedPatterns : this.allRoadPatterns(tableId);
     const side = bet?.side === "banker" || bet?.side === "player" ? bet.side : null;
-    const matching = side ? markedPatterns.filter((pattern) => pattern.prediction === side) : [];
-    const opposing = side ? allPatterns.filter((pattern) => pattern.prediction === (side === "banker" ? "player" : "banker")) : [];
+    const planningTarget = plannedSequence.at(-1) ?? side;
+    const matching = planningTarget ? markedPatterns.filter((pattern) => pattern.prediction === planningTarget) : [];
+    const opposing = planningTarget ? allPatterns.filter((pattern) => pattern.prediction === (planningTarget === "banker" ? "player" : "banker")) : [];
     const wagerShare = bet && liquidAssetsBeforeBet > 0 ? bet.amount / liquidAssetsBeforeBet : 0;
     const wagerBonus = Math.floor((wagerShare + 1e-9) / 0.1) * 0.05;
     const markedPatternBonus = matching.length * 0.05;
@@ -469,8 +858,18 @@ export class Game {
     return { target, low, high: Math.min(0.92, low + 0.24) };
   }
 
+  divineAssistProbability(): number {
+    if (!this.pending?.bet) return 0;
+    return Math.min(0.3, Math.max(0, this.confidence));
+  }
+
   shouldTriggerDivineAssist(): boolean {
-    return Boolean(this.pending?.bet) && this.rng.next() < (this.pending?.confidence ?? 0);
+    const pending = this.pending;
+    if (!pending?.bet) return false;
+    const fatal = pending.result.outcome !== pending.bet.side;
+    if (!fatal) return false;
+    if (this.confidence <= 0) return false;
+    return this.debugConfidenceForced || this.rng.next() < this.divineAssistProbability();
   }
 
   applyDivineAssist(side: Side, handIndex: number, probability: number): boolean {
@@ -560,11 +959,26 @@ export class Game {
     return this.cash;
   }
 
+  adjustDebugChips(amount: number): number {
+    if (!Number.isFinite(amount)) return this.availableChips;
+    const delta = Math.round(amount);
+    if (delta > 0) {
+      this.chips += delta;
+      return this.availableChips;
+    }
+    let remaining = Math.min(this.availableChips, Math.abs(delta));
+    const regular = Math.min(this.chips, remaining);
+    this.chips -= regular;
+    remaining -= regular;
+    this.mudChips = Math.max(0, this.mudChips - remaining);
+    return this.availableChips;
+  }
+
   get debugGameplayConfig(): DebugGameplayConfig {
     return {
       ...this.debugGameplay,
       restaurantIncomePerCycle: this.debugRestaurantIncomeOverride
-        ?? restaurantLevels[this.restaurant.level - 1]!.income,
+        ?? restaurantLevels[this.restaurant.level - 1]!.chipsOnSuccess,
     };
   }
 
@@ -642,22 +1056,26 @@ export class Game {
 
   settle(): SettlementResult {
     if (!this.pending) throw new Error("No pending round");
-    const { tableId, result, bet, createdRoadPrediction } = this.pending;
+    if (this.pendingChain) return this.settleChainLeg();
+    const { tableId, result, bet, betCurrency, createdRoadPrediction } = this.pending;
     const table = this.table(tableId);
     table.history.push(result);
     table.round += 1;
     this.trimTableHistory(table);
 
     let payout = 0;
-    let delta = bet ? -bet.amount : 0;
+    let delta = bet ? (betCurrency === "chip" ? 0 : -bet.amount) : 0;
     if (bet && result.outcome === "tie" && bet.side !== "tie") {
-      payout = bet.amount;
+      if (betCurrency === "chip") this.refundChips(bet.amount / 100);
+      else payout = bet.amount;
       delta = 0;
     } else if (bet && result.outcome === bet.side) {
       payout = bet.side === "tie" ? bet.amount * 9 : bet.side === "banker" ? Math.floor(bet.amount * 1.95) : bet.amount * 2;
-      delta = payout - bet.amount;
+      delta = betCurrency === "chip" ? payout : payout - bet.amount;
     }
     this.cash += payout;
+    if (bet && payout > 0 && betCurrency === "chip") table.dealerCash = Math.max(0, table.dealerCash - payout);
+    const dealerReward = this.grantDealerReward(table);
 
     if (bet) {
       const day = this.worldTimeInfo().day;
@@ -682,7 +1100,7 @@ export class Game {
     }
 
     this.pending = null;
-    return { delta, income: 0, roadCreation };
+    return { delta, income: 0, roadCreation, dealerReward };
   }
 
   tickRealtime(now: number, pausedTableId: string | null, insideCasino = false, worldTimePaused = false, pauseAtRestaurantClose = false): { income: number; tablesAdvanced: number; advancedTableIds: string[]; restaurantClosingReached: boolean; sleepDeprivationStarted: boolean; sleepDeprivationCollapseReached: boolean } {
@@ -727,6 +1145,8 @@ export class Game {
     if (crossedMidnights > 0) {
       this.sleepDebtWorldMinutes += crossedMidnights * sleepDebtPerMidnight;
       this.nextSleepDebtAtWorldMinute += crossedMidnights * 1440;
+      this.resetDealerFunds();
+      for (let day = 0; day < crossedMidnights; day += 1) this.rollDailyCheatSkills();
     }
     const sleepDeprivationStarted = reachesSleepDebtThreshold || (!wasSleepDeprived && this.sleepDebtWorldMinutes >= sleepDebtThreshold);
     let income = 0;
@@ -737,9 +1157,12 @@ export class Game {
       this.restaurant.cycleElapsedWorldMinutes += restaurantOperatingMinutes;
       while (this.restaurant.cycleElapsedWorldMinutes >= this.debugGameplay.restaurantCycleWorldMinutes) {
         this.restaurant.cycleElapsedWorldMinutes -= this.debugGameplay.restaurantCycleWorldMinutes;
-        const payout = this.debugRestaurantIncomeOverride ?? restaurantLevels[this.restaurant.level - 1]!.income;
-        this.cash += payout;
-        income += payout;
+        const level = restaurantLevels[this.restaurant.level - 1]!;
+        const chipsOnSuccess = this.debugRestaurantIncomeOverride ?? level.chipsOnSuccess;
+        if (this.debugRestaurantIncomeOverride !== null || this.rng.next() < level.chipChance) {
+          this.chips += chipsOnSuccess;
+          income += chipsOnSuccess;
+        }
       }
     }
     if (crossesRestaurantClose && !restaurantClosingReached && closeInMinutes <= elapsedWorldMinutes) this.closeRestaurant();
@@ -866,10 +1289,47 @@ export class Game {
     return value;
   }
 
+  restaurantChipInfo() {
+    const current = restaurantLevels[this.restaurant.level - 1]!;
+    return {
+      chance: current.chipChance,
+      chipsOnSuccess: current.chipsOnSuccess,
+      pawnLotChips: Math.max(1, Math.floor(current.pawn / 1000)),
+      pawnCapacityCash: Math.max(0, current.pawn - this.restaurant.pawnDebtCash),
+      pawnDebtCash: this.restaurant.pawnDebtCash,
+    };
+  }
+
+  pawnRestaurantForChips(): number {
+    if (this.restaurant.pawned) return 0;
+    const info = this.restaurantChipInfo();
+    const lotCash = Math.min(info.pawnCapacityCash, info.pawnLotChips * 100);
+    if (lotCash <= 0) return 0;
+    const chips = Math.floor(lotCash / 100);
+    this.restaurant.pawnDebtCash += lotCash;
+    this.mudChips += chips;
+    if (this.restaurantChipInfo().pawnCapacityCash < 100) {
+      this.restaurant.pawned = true;
+      this.closeRestaurant();
+    }
+    return chips;
+  }
+
+  redeemRestaurant(): boolean {
+    const debt = this.restaurant.pawnDebtCash;
+    if (debt <= 0 || this.cash < Math.ceil(debt * 2.5)) return false;
+    this.cash -= Math.ceil(debt * 2.5);
+    this.restaurant.pawnDebtCash = 0;
+    this.restaurant.pawned = false;
+    this.restaurant.open = true;
+    this.restaurant.closeAtWorldMinute = Math.floor(this.worldMinutes / 1440) * 1440 + RESTAURANT_CLOSING_MINUTE;
+    return true;
+  }
+
   restaurantInfo() {
     const current = restaurantLevels[this.restaurant.level - 1]!;
     const next = restaurantLevels[this.restaurant.level];
-    return { ...current, income: this.debugRestaurantIncomeOverride ?? current.income, nextCost: next?.cost ?? null };
+    return { ...current, income: 0, chipsOnSuccess: this.debugRestaurantIncomeOverride ?? current.chipsOnSuccess, pawnLotChips: Math.max(1, Math.floor(current.pawn / 1000)), nextCost: next?.cost ?? null, pawnDebtCash: this.restaurant.pawnDebtCash, pawnCapacityCash: Math.max(0, current.pawn - this.restaurant.pawnDebtCash) };
   }
 
   worldTimeInfo(): { day: number; hour: number; minute: number } {
@@ -883,7 +1343,7 @@ export class Game {
   }
 
   get gameOver(): boolean {
-    return this.cash <= 0 && this.restaurant.pawned;
+    return this.cash <= 0 && this.availableChips <= 0 && this.restaurantInfo().pawnCapacityCash <= 0;
   }
 
   private advanceTable(table: GameTable): void {

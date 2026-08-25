@@ -6,13 +6,13 @@ import mapAsset from "./map.jpg";
 import mapDaylightAsset from "./map_daylight.jpg";
 import restaurantAsset from "./restaurant.jpg";
 import { cardFaceAsset } from "./card-assets";
-import { cardLabel, cardValue, confidenceRoadStartColumn, forecastBaccaratReveal, makeBeadPlate, makeBigRoad, makeDerivedRoads, type BaccaratRevealForecast, type Card, type DerivedRoadCell, type DerivedRoadColor, type Outcome, type RoadBook, type RoundResult, type Side } from "./domain";
-import { casinos, DIVINE_CARD_TYPE_OPTIONS, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, inlineWatchSteps, skillDefinitions, type Casino, type DebugGameplayConfig, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
+import { cardLabel, cardValue, confidenceRoadStartColumn, makeBeadPlate, makeBigRoad, makeDerivedRoads, type Card, type DerivedRoadColor, type Outcome, type RoadBook, type RoundResult, type Side } from "./domain";
+import { casinos, cheatSkillDefinitions, DIVINE_CARD_TYPE_OPTIONS, Game, LOBBY_ROUND_MS, MAX_SKILL_LEVEL, inlineWatchSteps, skillDefinitions, type Casino, type CheatSkillId, type DebugGameplayConfig, type DivineCardType, type GameTable, type PendingRound, type RoadCreationResolution, type SettlementResult, type SkillId } from "./game";
 import { cardRevealActor, composeChipAmount, DIVINE_MASH_CLICK_RATIO, DIVINE_MASH_INITIAL_RATIO, divineMashRetreatRatioPerMs, TableScene, unrevealedDealtCardIndices, type TableChip } from "./table-scene";
 
 type View = "map" | "restaurant" | "skills" | "casino-select" | "lobby" | "table" | "dealing" | "game-over";
 type Activity = "restaurant" | "casino" | "home";
-type DealStage = "animating" | "drawing-card" | "awaiting-card" | "dealer-revealing" | "settling-chips" | "settled";
+type DealStage = "animating" | "drawing-card" | "awaiting-card" | "awaiting-cheat" | "dealer-revealing" | "settling-chips" | "settled";
 
 const game = new Game();
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -21,15 +21,39 @@ let activeActivity: Activity = "restaurant";
 let casinoId = casinos[0]!.id;
 let tableId = "harbor-1";
 let stagedBetSide: Outcome | null = null;
-let stagedBetChips: TableChip[] = [];
 let roundWagerChips: TableChip[] = [];
-let selectedChip = 100;
+let selectedChipCount = 1;
+let chainRounds = 1;
+let chainTargets: Outcome[] = ["banker"];
+let chainTargetSelected: boolean[] = [false];
 let tableScene: TableScene | null = null;
+let chainScenes = new Map<number, TableScene>();
+interface ChainLegUiState { dealtCardCount: number; revealedCardIndices: Set<number>; peekedCardIndices: Set<number>; dealStage: DealStage; divineCheckedStages: Set<number>; divineRevealFeedback: Map<number, { hit: boolean; target: Outcome; probability: number }>; divineActivations: number; }
+let chainLegUiStates = new Map<number, ChainLegUiState>();
+let activeChainLegIndex: number | null = null;
+let armedCheatSkill: CheatSkillId | null = null;
 let lastSettlement: SettlementResult | null = null;
 let lastRound: PendingRound | null = null;
+interface ChainSettlementLegView {
+  index: number;
+  target: Outcome;
+  result: RoundResult;
+  settled: boolean;
+}
+interface ChainSettlementView {
+  stake: number;
+  plannedRounds: number;
+  effectiveRounds: number;
+  ties: number;
+  won: boolean;
+  payout: number;
+  legs: ChainSettlementLegView[];
+}
+let lastChainSettlement: ChainSettlementView | null = null;
 let viewTimers: number[] = [];
 let dealStage: DealStage = "animating";
 let revealedCardIndices = new Set<number>();
+let peekedCardIndices = new Set<number>();
 let divineCheckedStages = new Set<number>();
 let divineRevealFeedback = new Map<number, { hit: boolean; target: Outcome; probability: number }>();
 let divineActivationsThisRound = 0;
@@ -41,6 +65,7 @@ let inlineWatchActive = false;
 let inlineWatchStep = 0;
 let inlineWatchSettled = false;
 let roadMarkFeedback: { message: string; debug: string } | null = null;
+void roadMarkFeedback;
 let roadCreationFailure: RoadCreationResolution | null = null;
 let restaurantClosingPromptOpen = false;
 let sleepTransitionActive = false;
@@ -52,10 +77,10 @@ let homeSkillManagementOpen = false;
 let restChoiceOpen = false;
 
 const money = (value: number) => `¥${Math.floor(value).toLocaleString("zh-CN")}`;
+const chips = (value: number) => `${Math.max(0, Math.floor(value / 100))} 枚筹码`;
 const outcomeName = (outcome: Outcome) => ({ banker: "庄", player: "闲", tie: "和" })[outcome];
 const chipDenominations = (casino: Casino) => [1, 2, 5, 10, 20].map((multiple) => casino.minBet * multiple).filter((value) => value <= casino.maxBet);
-const roadBooks: RoadBook[] = ["bead", "big", "big-eye", "small", "cockroach"];
-const SHOW_LAST_CARD_FORECAST = false;
+const roadBooks: RoadBook[] = ["bead", "big"];
 const markedRoadBookCount = (currentTableId: string) => roadBooks.filter((roadBook) => game.roadMark(currentTableId, roadBook)).length;
 
 interface RoadPreviewCell {
@@ -128,10 +153,296 @@ function roadCreationTargets(table: GameTable, roadBook: RoadBook, visibleFrom: 
   }).join("");
 }
 
-function resetBetDraft(refund = true): void {
+function resetBetDraft(refund = true, clearRoad = true): void {
   if (refund) game.cancelReservedBet();
   stagedBetSide = null;
-  stagedBetChips = [];
+  chainRounds = 1;
+  chainTargets = ["banker"];
+  chainTargetSelected = [false];
+  armedCheatSkill = null;
+  if (clearRoad) game.setRoadCreationSequence(tableId, []);
+}
+
+function saveActiveChainLegUi(): void {
+  if (activeChainLegIndex === null) return;
+  chainLegUiStates.set(activeChainLegIndex, {
+    dealtCardCount,
+    revealedCardIndices: new Set(revealedCardIndices),
+    peekedCardIndices: new Set(peekedCardIndices),
+    dealStage,
+    divineCheckedStages: new Set(divineCheckedStages),
+    divineRevealFeedback: new Map(divineRevealFeedback),
+    divineActivations: divineActivationsThisRound,
+  });
+}
+
+function loadChainLegUi(index: number): void {
+  const state = chainLegUiStates.get(index);
+  dealtCardCount = state?.dealtCardCount ?? 4;
+  revealedCardIndices = new Set(state?.revealedCardIndices ?? []);
+  peekedCardIndices = new Set(state?.peekedCardIndices ?? []);
+  dealStage = state?.dealStage ?? "animating";
+  divineCheckedStages.clear();
+  divineRevealFeedback.clear();
+  divineCheckedStages = new Set(state?.divineCheckedStages ?? []);
+  divineRevealFeedback = new Map(state?.divineRevealFeedback ?? []);
+  divineActivationsThisRound = state?.divineActivations ?? 0;
+  tablePlayerInteractionActive = false;
+}
+
+function selectChainLeg(index: number, cardIndex: number | null = null): void {
+  if (!game.pendingChain) return;
+  const leg = game.pendingChain.legs[index];
+  if (!leg || leg.settled) return;
+  saveActiveChainLegUi();
+  if (!game.selectChainLeg(index)) return;
+  activeChainLegIndex = index;
+  lastRound = game.pending;
+  lastSettlement = null;
+  loadChainLegUi(index);
+  tableScene = chainScenes.get(index) ?? tableScene;
+  app.querySelectorAll<HTMLElement>("[data-chain-stage]").forEach((stage) => {
+    const stageIndex = Number(stage.dataset.chainStage);
+    const board = stage.closest<HTMLElement>(".chain-table-board");
+    board?.classList.toggle("active", stageIndex === index && !game.pendingChain?.legs[stageIndex]?.settled);
+    board?.classList.toggle("queued", stageIndex !== index && !game.pendingChain?.legs[stageIndex]?.settled);
+    board?.classList.toggle("done", Boolean(game.pendingChain?.legs[stageIndex]?.settled));
+  });
+  const activeScene = chainScenes.get(index);
+  if (activeScene && dealStage === "awaiting-card" && game.pending) {
+    activeScene.setCardSelection(unrevealedDealtCardIndices(dealtCardCount, revealedCardIndices), (selectedIndex) => selectCardForRevealForLeg(index, selectedIndex));
+  }
+  if (cardIndex !== null) window.setTimeout(() => selectCardForRevealForLeg(index, cardIndex), 0);
+  updateChainLegReports();
+}
+
+function selectCardForRevealForLeg(legIndex: number, cardIndex: number): void {
+  if (armedCheatSkill) {
+    const target = cheatTargetForCard(armedCheatSkill, legIndex, cardIndex);
+    if (target) {
+      const skill = armedCheatSkill;
+      armedCheatSkill = null;
+      updateCheatArmedState();
+      applyCheatSkillToTarget(skill, target);
+    } else {
+      game.notice = "这张牌不符合当前千术的使用条件";
+      updateCheatArmedState();
+    }
+    return;
+  }
+  if (!game.pendingChain) {
+    selectCardForReveal(cardIndex);
+    return;
+  }
+  if (game.pendingChain.currentLegIndex !== legIndex) selectChainLeg(legIndex);
+  const scene = chainScenes.get(legIndex);
+  if (scene) selectCardForReveal(cardIndex, scene, legIndex);
+}
+
+function chainLegReportText(index: number): string {
+  const chain = game.pendingChain;
+  if (!chain) return "";
+  const leg = chain.legs[index];
+  if (!leg) return "";
+  if (leg.settled) return leg.result.outcome === "tie" ? "已结算 · 和局" : `已结算 · ${outcomeName(leg.result.outcome)}家胜`;
+  if (game.pending && chain.currentLegIndex === index) {
+    if (dealStage === "animating") return "发牌中 · 请稍候";
+    if (dealStage === "drawing-card") return "补牌中 · 请稍候";
+    if (dealStage === "awaiting-card") return "等待开牌";
+    if (dealStage === "awaiting-cheat") return "本局未中 · 可选择出千或放弃";
+    if (dealStage === "dealer-revealing") return "荷官开牌中";
+    if (dealStage === "settling-chips") return "筹码结算中";
+  }
+  const state = chainLegUiStates.get(index);
+  if (state?.dealStage === "awaiting-card") return "等待操作 · 点击牌面开牌";
+  if (state?.dealStage === "awaiting-cheat") return "本局未中 · 可选择出千或放弃";
+  return "等待进入本局";
+}
+
+function awaitingCheatLegIndices(): number[] {
+  if (!game.pendingChain) return dealStage === "awaiting-cheat" ? [0] : [];
+  return game.pendingChain.legs
+    .map((leg, index) => ({ leg, index }))
+    .filter(({ leg, index }) => !leg.settled && (
+      (game.pendingChain?.currentLegIndex === index && dealStage === "awaiting-cheat")
+      || chainLegUiStates.get(index)?.dealStage === "awaiting-cheat"
+    ))
+    .map(({ index }) => index);
+}
+
+function chainLegReportMarkup(index: number): string {
+  const chain = game.pendingChain;
+  const leg = chain?.legs[index];
+  const pending = pendingChainLeg(index);
+  if (!chain || !leg || !pending) return "";
+  const active = chain.currentLegIndex === index && game.pending;
+  const state = chainLegUiStates.get(index);
+  const revealed = active ? revealedCardIndices : state?.revealedCardIndices ?? new Set<number>();
+  const sequence = dealSequence(pending);
+  const pointsFor = (side: Side) => sequence.filter((entry, cardIndex) => entry.side === side && revealed.has(cardIndex)).reduce((sum, entry) => sum + cardValue(entry.card), 0) % 10;
+  const status = chainLegReportText(index);
+  const canOpenCard = !leg.settled && ((active && dealStage === "awaiting-card") || state?.dealStage === "awaiting-card");
+  const operationHint = canOpenCard ? `<small class="chain-report-instruction">操作：点击牌面开牌 · 点击聚焦牌面快速开牌 · 拖动手动咪牌</small>` : "";
+  const bankerPoints = revealed.size ? pointsFor("banker") : null;
+  const playerPoints = revealed.size ? pointsFor("player") : null;
+  const comparable = bankerPoints !== null && playerPoints !== null;
+  const leader = comparable && bankerPoints !== playerPoints ? bankerPoints! > playerPoints! ? "banker" : "player" : null;
+  const summary = leg.settled
+    ? leg.result.outcome === "tie" ? "本局和局" : `${outcomeName(leg.result.outcome)}家胜`
+    : comparable ? leader ? `${outcomeName(leader)}家领先 ${Math.abs(bankerPoints! - playerPoints!)} 点` : "庄闲当前同点" : status;
+  const scoreCell = (side: Side, points: number | null) => `<div class="chain-report-score-cell ${side} ${leg.target === side ? "owned" : ""}"><span>${outcomeName(side)}家${leg.target === side ? " · 你押" : ""}</span><strong>${points ?? "—"}<small>点</small></strong><em>${points === null ? "待开" : !comparable ? "已开" : leader === side ? "领先" : leader ? "落后" : "同点"}</em></div>`;
+  return `<div class="chain-report-lead">${operationHint}<small>${status}</small></div><div class="chain-report-score-panel"><div class="chain-report-summary"><span>实时牌势</span><strong>${summary}</strong></div>${scoreCell("banker", bankerPoints)}${scoreCell("player", playerPoints)}</div>`;
+}
+
+function chainLegResultLabel(leg: { settled: boolean; target: Outcome; result: RoundResult }): string {
+  if (!leg.settled) return `押${outcomeName(leg.target)}`;
+  if (leg.result.outcome === "tie") return "和局 · 退注";
+  return leg.result.outcome === leg.target ? `押中${outcomeName(leg.target)}` : "本局失败";
+}
+
+function updateChainLegReports(): void {
+  app.querySelectorAll<HTMLElement>("[data-chain-leg-report]").forEach((element) => {
+    element.innerHTML = chainLegReportMarkup(Number(element.dataset.chainLegReport));
+  });
+}
+
+interface CheatTarget {
+  legIndex: number;
+  cardIndex: number;
+  side: Side;
+  handIndex: number;
+  label: string;
+}
+
+function cheatTargetForCard(skillId: CheatSkillId, legIndex: number, cardIndex: number): CheatTarget | null {
+  const chain = game.pendingChain;
+  const leg = chain?.legs[legIndex];
+  if (leg?.settled) return null;
+  const pending = chain ? pendingChainLeg(legIndex) : game.pending;
+  if (!pending) return null;
+  const active = !chain || chain.currentLegIndex === legIndex;
+  const count = active ? dealtCardCount : chainLegUiStates.get(legIndex)?.dealtCardCount ?? 4;
+  const revealed = active ? revealedCardIndices : chainLegUiStates.get(legIndex)?.revealedCardIndices ?? new Set<number>();
+  const entry = dealSequence(pending)[cardIndex];
+  if (!entry || cardIndex >= count) return null;
+  const isCovered = !revealed.has(cardIndex);
+  const coveredSkill = ["peek-covered", "swap-covered", "set-edge"].includes(skillId);
+  if (coveredSkill !== isCovered) return null;
+  return { legIndex, cardIndex, side: entry.side, handIndex: entry.handIndex, label: `第 ${legIndex + 1} 局 · ${entry.side === "player" ? "PLAYER" : "BANKER"} · 第 ${entry.handIndex + 1} 张 · ${isCovered ? "盖牌" : "明牌"}` };
+}
+
+function refreshCheatTargetScene(target: CheatTarget, skillId: CheatSkillId): void {
+  const pending = game.pendingChain ? pendingChainLeg(target.legIndex) : game.pending;
+  const scene = game.pendingChain ? chainScenes.get(target.legIndex) : tableScene;
+  if (!pending || !scene) return;
+  const sequence = dealSequence(pending);
+  sequence.forEach((entry, index) => scene.setCard(index, entry.card));
+  if (skillId === "peek-covered") {
+    const chainState = game.pendingChain?.legs[target.legIndex]?.settled ? null : game.pendingChain ? chainLegUiStates.get(target.legIndex) : null;
+    const active = !game.pendingChain || game.pendingChain.currentLegIndex === target.legIndex;
+    const revealed = active ? revealedCardIndices : new Set(chainState?.revealedCardIndices ?? []);
+    const peeked = active ? peekedCardIndices : new Set(chainState?.peekedCardIndices ?? []);
+    const count = active ? dealtCardCount : chainState?.dealtCardCount ?? sequence.length;
+    for (let index = 0; index < count; index += 1) {
+      if (!revealed.has(index)) {
+        peeked.add(index);
+        scene.showPeeked(index);
+      }
+    }
+    if (active) {
+      peekedCardIndices = peeked;
+      scene.setCardSelection(unrevealedDealtCardIndices(count, revealed), selectCardForReveal);
+    } else {
+      chainLegUiStates.set(target.legIndex, {
+        dealtCardCount: count,
+        revealedCardIndices: revealed,
+        peekedCardIndices: peeked,
+        dealStage: chainState?.dealStage ?? "awaiting-card",
+        divineCheckedStages: new Set(chainState?.divineCheckedStages ?? []),
+        divineRevealFeedback: new Map(chainState?.divineRevealFeedback ?? []),
+        divineActivations: chainState?.divineActivations ?? 0,
+      });
+      scene.setCardSelection(unrevealedDealtCardIndices(count, revealed), (cardIndex) => selectCardForRevealForLeg(target.legIndex, cardIndex));
+    }
+  }
+}
+
+function applyCheatSkillToTarget(skillId: CheatSkillId, target: CheatTarget): void {
+  const overlay = document.querySelector<HTMLElement>(".cheat-target-picker");
+  overlay?.remove();
+  const pending = game.pendingChain ? pendingChainLeg(target.legIndex) : game.pending;
+  if (!pending || !game.useCheatSkill(skillId, target.side, target.handIndex, game.pendingChain ? target.legIndex : null)) {
+    game.notice = "当前牌面无法使用这项千术";
+    render();
+    return;
+  }
+  game.notice = `出千成功 · 指定第 ${target.legIndex + 1} 局第 ${target.handIndex + 1} 张 · 消耗 1 枚筹码`;
+  refreshCheatTargetScene(target, skillId);
+  const chipWallet = document.querySelector<HTMLElement>(".chip-wallet strong");
+  if (chipWallet) chipWallet.textContent = `${game.availableChips} 枚`;
+  const targetStillLosing = pendingIsLoss(pending);
+  const noCheatResourcesRemaining = game.availableChips <= 0 || game.availableCheatSkills.length === 0;
+  const targetWasAwaitingCheat = awaitingCheatLegIndices().includes(target.legIndex);
+  if (targetWasAwaitingCheat && (!targetStillLosing || noCheatResourcesRemaining)) {
+    if (game.pendingChain && game.pendingChain.currentLegIndex !== target.legIndex) selectChainLeg(target.legIndex);
+    if (game.pending) {
+      dealStage = "awaiting-cheat";
+      settleOnTable();
+      return;
+    }
+  }
+  updateChainLegReports();
+}
+
+function openCheatTargetPicker(skillId: CheatSkillId): void {
+  armedCheatSkill = skillId;
+  game.notice = cheatTargetInstruction(skillId);
+  updateCheatArmedState();
+  const legs = game.pendingChain ? game.pendingChain.legs.map((_, index) => index) : [0];
+  legs.forEach((legIndex) => {
+    const pending = game.pendingChain ? pendingChainLeg(legIndex) : game.pending;
+    if (!pending || game.pendingChain?.legs[legIndex]?.settled) return;
+    const active = !game.pendingChain || game.pendingChain.currentLegIndex === legIndex;
+    const count = active ? dealtCardCount : chainLegUiStates.get(legIndex)?.dealtCardCount ?? 4;
+    const selectable = dealSequence(pending).slice(0, count).map((_, cardIndex) => cardIndex).filter((cardIndex) => Boolean(cheatTargetForCard(skillId, legIndex, cardIndex)));
+    const scene = game.pendingChain ? chainScenes.get(legIndex) : tableScene;
+    scene?.setCardSelection(selectable, (cardIndex) => game.pendingChain ? selectCardForRevealForLeg(legIndex, cardIndex) : selectCardForReveal(cardIndex, scene), true);
+  });
+}
+
+function cheatTargetInstruction(skillId: CheatSkillId): string {
+  const definition = cheatSkillDefinitions.find((item) => item.id === skillId);
+  const target = definition?.timing === "face-up" ? "明牌牌张" : "盖牌牌张";
+  return `${definition?.name ?? "千术"}已选择 · 请点击任意牌局的${target}`;
+}
+
+function updateCheatArmedState(): void {
+  document.body.classList.toggle("cheat-target-armed", Boolean(armedCheatSkill));
+  document.querySelectorAll<HTMLElement>("[data-cheat-armed-label]").forEach((element) => {
+    element.textContent = armedCheatSkill ? cheatTargetInstruction(armedCheatSkill) : "出千 · 选择千术后点击目标牌";
+  });
+  document.querySelectorAll<HTMLElement>("[data-cheat-cancel]").forEach((element) => {
+    element.classList.toggle("hidden", !armedCheatSkill);
+  });
+}
+
+function restoreCardSelectionAfterCheatCancel(): void {
+  if (game.pendingChain) {
+    game.pendingChain.legs.forEach((leg, index) => {
+      if (leg.settled) return;
+      const active = game.pendingChain?.currentLegIndex === index;
+      const count = active ? dealtCardCount : chainLegUiStates.get(index)?.dealtCardCount ?? 4;
+      const revealed = active ? revealedCardIndices : chainLegUiStates.get(index)?.revealedCardIndices ?? new Set<number>();
+      chainScenes.get(index)?.setCardSelection(
+        unrevealedDealtCardIndices(count, revealed),
+        (cardIndex) => selectCardForRevealForLeg(index, cardIndex),
+      );
+    });
+    return;
+  }
+  if (tableScene && game.pending && dealStage === "awaiting-card") {
+    tableScene.setCardSelection(unrevealedDealtCardIndices(dealtCardCount, revealedCardIndices), selectCardForReveal);
+  }
 }
 const worldTimeLabel = () => {
   const { day, hour, minute } = game.worldTimeInfo();
@@ -159,6 +470,7 @@ const worldTimePaused = () => activeActivity === "home"
   || sleepCollapsePromptOpen
   || view === "table"
   || (view === "dealing" && (dealStage === "awaiting-card" || dealStage === "settled" || tablePlayerInteractionActive))
+  || (view === "dealing" && (dealStage === "awaiting-cheat" || awaitingCheatLegIndices().length > 0))
   || (debugMenuOpen && view === "dealing");
 
 function shell(content: string): string {
@@ -173,6 +485,7 @@ function shell(content: string): string {
       <div class="world-clock ${worldTimePaused() ? "paused" : ""} ${game.isSleepDeprived() ? "sleep-deprived" : ""}"><span>世界时间</span><strong data-world-clock>${worldTimeLabel()}</strong><em class="sleep-status" data-sleep-status ${game.isSleepDeprived() ? "" : "hidden"}>睡眠不足</em></div>
       <div class="confidence"><span>信心</span><strong>${Math.round(game.confidence * 100)}%</strong></div>
       <div class="wallet"><span>可用现金</span><strong>${money(game.cash)}</strong></div>
+      <div class="wallet chip-wallet"><span>可用筹码</span><strong>${game.availableChips} 枚</strong></div>
     </header>
     <main>${content}</main>
     ${restaurantClosingPromptOpen ? restaurantClosingPrompt() : ""}
@@ -270,38 +583,25 @@ function roadStats(table: GameTable): string {
   return `<div class="road-stats"><div class="banker-stat"><span>庄</span><b>${banker}</b></div><div class="player-stat"><span>闲</span><b>${player}</b></div><div class="tie-stat"><span>和</span><b>${tie}</b></div><div class="pair-stat banker-stat"><span>庄对</span><b>${bankerPair}</b></div><div class="pair-stat player-stat"><span>闲对</span><b>${playerPair}</b></div><div class="round-stat"><span>局</span><b>${table.history.length}</b></div></div>`;
 }
 
-type DerivedRoadKind = "big-eye" | "small-road" | "cockroach-road";
-
-function derivedRoad(table: GameTable, cells: DerivedRoadCell[], label: string, roadBook: RoadBook, kind: DerivedRoadKind, compact = false, interactive = false): string {
-  const previews = roadPreviewCells(table, roadBook);
-  const ghosts = roadCreatedCells(table, roadBook);
-  const maxColumn = Math.max(...cells.map((cell) => cell.column), ...previews.map((cell) => cell.column), ...ghosts.map((cell) => cell.column), 0);
-  const columns = compact ? 12 : 18;
-  const visibleFrom = Math.max(0, maxColumn - columns + 1);
-  return `<div class="derived-block ${kind}"><div class="derived-label ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="${roadBook}" title="点击标题栏对应列标记路数"` : ""}><i class="road-symbol ${kind} red"></i>${label}</div><div class="derived-road ${compact ? "compact" : ""} ${interactive ? "creatable-road" : ""}" style="--columns:${columns}" aria-label="${label}" data-road-window data-visible-from="${visibleFrom}" data-columns="${columns}">${roadMarkOverlay(table, roadBook, visibleFrom, columns)}${cells.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="derived-mark ${cell.color}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}${ghosts.filter((cell) => cell.column >= visibleFrom).map((cell) => `<span class="derived-mark created-road-ghost ${cell.color}" style="--row:${cell.row};--col:${cell.column - visibleFrom}"></span>`).join("")}${interactive ? roadCreationTargets(table, roadBook, visibleFrom) : ""}</div></div>`;
-}
-
 function beadRoadPanel(table: GameTable, interactive = false, columns = 9): string {
   return `<section class="bead-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="bead" title="点击标题栏标记整张珠盘路"` : ""}><i class="bead-symbol banker"></i>珠盘路</div>${beadPlate(table, interactive, columns)}</section>`;
 }
 
 function roadSheet(table: GameTable, compact = false, interactive = false, layout: "full" | "expanded" = "full"): string {
-  const derived = makeDerivedRoads(table.history);
   const bead = beadRoadPanel(table, interactive);
   const bigRoadPanel = (columns?: number) => `<section class="big-road-panel"><div class="road-panel-heading ${interactive ? "road-mark-title" : ""}" ${interactive ? `data-road-mark-title="big" title="点击标题栏对应列标记路数"` : ""}><i class="big-road-symbol banker"></i>大路</div>${road(table, compact, interactive, columns)}</section>`;
   const desktopBig = bigRoadPanel(layout === "expanded" ? 30 : undefined);
   const mobileBig = bigRoadPanel(layout === "expanded" ? 18 : undefined);
-  const derivedRoads = (derivedCompact: boolean) => `${derivedRoad(table, derived.bigEye, "大眼仔路", "big-eye", "big-eye", derivedCompact, interactive)}${derivedRoad(table, derived.small, "小路", "small", "small-road", derivedCompact, interactive)}${derivedRoad(table, derived.cockroach, "曱甴路", "cockroach", "cockroach-road", derivedCompact, interactive)}`;
   const info = `<aside class="road-info-panel"><div class="road-stats-title">牌局结果</div>${roadStats(table)}</aside>`;
   const expandedClass = layout === "expanded" ? "expanded" : "";
   const desktopBead = layout === "expanded" ? beadRoadPanel(table, interactive, 10) : bead;
   const mobileBead = layout === "expanded" ? beadRoadPanel(table, interactive, 18) : bead;
   const desktopRoadContent = layout === "expanded"
-    ? `${info}${desktopBead}${desktopBig}<div class="derived-grid">${derivedRoads(false)}</div>`
-    : `${desktopBead}${desktopBig}<div class="derived-grid">${derivedRoads(true)}</div>${info}`;
+    ? `${info}${desktopBead}${desktopBig}`
+    : `${desktopBead}${desktopBig}${info}`;
   const mobileRoadContent = layout === "expanded"
-    ? `${info}${mobileBead}${mobileBig}<div class="derived-grid">${derivedRoads(true)}</div>`
-    : `${mobileBead}${mobileBig}<div class="derived-grid">${derivedRoads(true)}</div>${info}`;
+    ? `${info}${mobileBead}${mobileBig}`
+    : `${mobileBead}${mobileBig}${info}`;
   return `<div class="road-sheet road-sheet-desktop ${compact ? "compact" : ""} ${expandedClass}"><div class="road-board">${desktopRoadContent}</div></div><div class="road-sheet road-sheet-mobile ${compact ? "compact" : ""} ${expandedClass}"><div class="mobile-road-stack">${mobileRoadContent}</div></div>`;
 }
 
@@ -331,7 +631,7 @@ function mapView(): string {
           <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">♠</span><strong>赌场</strong><small>海湾娱乐城 · 金殿贵宾厅</small>${locationStatus("casino", "进入")}
         </button>
         <button class="map-location map-location-restaurant ${locationClass("restaurant")}" data-action="restaurant" aria-label="${activeActivity === "restaurant" ? "返回餐厅" : "进入餐厅"}">
-          <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">店</span><strong>外港小馆</strong><small>${game.restaurant.pawned ? "已典当 · 停止营业" : `${game.restaurant.open ? "营业中" : "已打烊"} · ${game.restaurant.level} 级 · 每小时 ${money(restaurant.income)}`}</small>${locationStatus("restaurant", game.restaurant.open ? "经营" : "打烊")}
+          <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">店</span><strong>外港小馆</strong><small>${game.restaurant.pawned ? "已典当 · 停止营业" : `${game.restaurant.open ? "营业中" : "已打烊"} · ${game.restaurant.level} 级 · ${Math.round(restaurant.chipChance * 100)}% 概率得 ${restaurant.chipsOnSuccess} 枚筹码`}</small>${locationStatus("restaurant", game.restaurant.open ? "经营" : "打烊")}
         </button>
         <button class="map-location map-location-home ${locationClass("home")}" data-action="skills" aria-label="${activeActivity === "home" ? "返回自宅" : "进入自宅"}">
           <span class="map-location-pulse" aria-hidden="true"></span><span class="map-location-icon">宅</span><strong>自宅</strong><small>技能管理 · 赌术构筑</small>${locationStatus("home", "进入")}
@@ -345,15 +645,20 @@ function mapView(): string {
 
 function skillsView(): string {
   const equipped = skillDefinitions.find((skill) => skill.id === game.equippedSkill);
+  const dailyCheatSummary = game.availableCheatSkills.map((id) => {
+    const definition = cheatSkillDefinitions.find((item) => item.id === id)!;
+    return `<article class="skill-card equipped"><header><div><span>今日可用千术</span><h2>${definition.name}</h2></div><strong>临时</strong></header><p>${definition.description}</p><dl><div><dt>使用时机</dt><dd>${definition.timing === "covered" ? "盖牌阶段" : "明牌阶段"}</dd></div><div><dt>消耗</dt><dd>1 枚筹码</dd></div></dl></article>`;
+  }).join("");
   const daylight = worldIsDaylight();
   const skillManagement = homeSkillManagementOpen ? `<div class="home-skill-overlay" role="dialog" aria-modal="true" aria-labelledby="home-skill-title">
     <section class="residence-skill-workspace">
-      <header class="home-skill-header"><div><span>书桌 · 赌术构筑</span><h2 id="home-skill-title">技能管理</h2><small>只有一个技能栏位</small></div><button class="home-skill-close" data-action="close-skill-management" aria-label="关闭技能管理">×</button></header>
+      <header class="home-skill-header"><div><span>书桌 · 今日千术</span><h2 id="home-skill-title">临时千术</h2><small>每天开始时重新抽取，今日结束后清除</small></div><button class="home-skill-close" data-action="close-skill-management" aria-label="关闭技能管理">×</button></header>
+      <section class="skill-grid daily-cheat-grid">${dailyCheatSummary}</section>
       <section class="equipped-skill-slot ${equipped ? "filled" : "empty"}">
         <div><span>唯一技能栏位 · 1 SLOT</span><h2>${equipped ? equipped.name : "尚未装备技能"}</h2><p>${equipped ? `${equipped.description} 当前 Lv.${game.skills[equipped.id]}，等级保留但不参与本轮信心公式。` : "未装备技能也可以通过标记路书获得信心。"}</p></div>
         ${equipped ? `<button class="secondary" data-action="unequip-skill">卸下技能</button>` : ""}
       </section>
-      <div class="skill-grid">${skillDefinitions.map((skill) => {
+      <div class="skill-grid legacy-skill-grid">${skillDefinitions.map((skill) => {
     const level = game.skills[skill.id];
     const equippedNow = game.equippedSkill === skill.id;
     const upgradeCost = game.skillUpgradeCost(skill.id);
@@ -393,12 +698,12 @@ function restaurantView(): string {
       <div class="restaurant-scene">
         <img class="restaurant-scene-art" src="${restaurantAsset}" alt="外港小馆内部场景">
         <div class="restaurant-scene-shade" aria-hidden="true"></div>
-        <div class="restaurant-scene-header"><div><p class="eyebrow">稳定收入 · 外港小馆</p><h1>${game.restaurant.pawned ? "已典当" : game.restaurant.open ? `${game.restaurant.level} 级经营中` : "今日已打烊"}</h1></div></div>
+        <div class="restaurant-scene-header"><div><p class="eyebrow">筹码产出 · 外港小馆</p><h1>${game.restaurant.pawned ? "已典当" : game.restaurant.open ? `${game.restaurant.level} 级经营中` : "今日已打烊"}</h1></div></div>
         <section class="restaurant-control-panel ${game.restaurant.pawned ? "is-pawned" : ""} ${game.restaurant.open ? "is-open" : "is-closed"}">
-          <header><div><span>餐厅经营 · 08:00 - 20:00</span><h2>${game.restaurant.pawned ? "停止营业" : game.restaurant.open ? "营业中" : "已打烊"}</h2></div><strong>${game.restaurant.pawned || !game.restaurant.open ? "—" : money(info.income)}<small>${game.restaurant.pawned ? "无收益" : game.restaurant.open ? `/ ${cycleLabel}` : "等待继续营业"}</small></strong></header>
-          <div class="restaurant-scene-stats"><div><span>当前等级</span><b>Lv.${game.restaurant.level}</b></div><div><span>周期收益</span><b>${game.restaurant.pawned || !game.restaurant.open ? "停止" : money(info.income)}</b></div><div><span>典当估值</span><b>${game.restaurant.pawned ? "已领取" : money(info.pawn)}</b></div></div>
+          <header><div><span>餐厅经营 · 08:00 - 20:00</span><h2>${game.restaurant.pawned ? "停止营业" : game.restaurant.open ? "营业中" : "已打烊"}</h2></div><strong>${game.restaurant.pawned || !game.restaurant.open ? "—" : `${Math.round(info.chipChance * 100)}%`}<small>${game.restaurant.pawned ? "无收益" : game.restaurant.open ? `概率获得 ${info.chipsOnSuccess} 枚筹码 / ${cycleLabel}` : "等待继续营业"}</small></strong></header>
+          <div class="restaurant-scene-stats"><div><span>当前等级</span><b>Lv.${game.restaurant.level}</b></div><div><span>周期产出</span><b>${game.restaurant.pawned || !game.restaurant.open ? "停止" : `${Math.round(info.chipChance * 100)}% · ${info.chipsOnSuccess} 枚筹码`}</b></div><div><span>抵押额度</span><b>${game.restaurant.pawned ? "已用尽" : money(info.pawnCapacityCash)}</b></div></div>
           <div class="restaurant-progress ${game.restaurant.open ? "" : "is-stopped"}" data-restaurant-progress><div><span>下一次结算</span><em>${game.restaurant.pawned ? "已停止" : game.restaurant.open ? `${worldMinutesRemaining} 游戏分钟后` : "餐厅已打烊"}</em></div><i><b style="width:${game.restaurant.open ? progress * 100 : 0}%"></b></i></div>
-          <div class="restaurant-actions">${!game.restaurant.open && !game.restaurant.pawned ? `<button class="primary" data-action="continue-restaurant">继续营业 · 至下次打烊</button>` : ""}<button class="primary" data-action="upgrade" ${game.restaurant.pawned || max || game.cash < (info.nextCost ?? 0) ? "disabled" : ""}>${max ? "已达最高等级" : `升级 · ${money(info.nextCost!)}`}</button><button class="danger" data-action="pawn" ${game.restaurant.pawned ? "disabled" : ""}>典当 · 获得 ${money(info.pawn)}</button></div>
+          <div class="restaurant-actions">${!game.restaurant.open && !game.restaurant.pawned ? `<button class="primary" data-action="continue-restaurant">继续营业 · 至下次打烊</button>` : ""}<button class="primary" data-action="upgrade" ${game.restaurant.pawned || max || game.cash < (info.nextCost ?? 0) ? "disabled" : ""}>${max ? "已达最高等级" : `升级 · ${money(info.nextCost!)}`}</button><button class="danger" data-action="pawn" ${game.restaurant.pawned || info.pawnCapacityCash < 100 ? "disabled" : ""}>抵押 · 获得 ${info.pawnLotChips} 枚泥码</button>${info.pawnDebtCash > 0 ? `<button class="secondary" data-action="redeem-pawn" ${game.cash < Math.ceil(info.pawnDebtCash * 2.5) ? "disabled" : ""}>赎回 · ${money(Math.ceil(info.pawnDebtCash * 2.5))}</button>` : ""}</div>
         </section>
       </div>
     </section>
@@ -412,7 +717,7 @@ function casinoSelectView(): string {
         <img class="casino-scene-art" src="${casinoAsset}" alt="赌场大厅场景">
         <div class="casino-scene-shade" aria-hidden="true"></div>
         <div class="casino-scene-header"><div><p class="eyebrow">今晚去哪一场</p><h1>选择赌场</h1><small>选择等级，支付门票进入牌桌大厅</small></div></div>
-        ${casinos.map((casino, index) => `<button class="casino-scene-choice ${casino.tone} casino-scene-choice-${index + 1}" data-casino="${casino.id}" ${game.cash < casino.entryFee ? "disabled" : ""}><span class="casino-scene-number">0${index + 1}</span><div><span>${casino.subtitle}</span><strong>${casino.name}</strong></div><dl><div><dt>门票</dt><dd>${money(casino.entryFee)}</dd></div><div><dt>牌桌</dt><dd>${casino.tableCount} 张</dd></div><div><dt>注码</dt><dd>${money(casino.minBet)} - ${money(casino.maxBet)}</dd></div></dl><b>${game.cash < casino.entryFee ? `现金不足 · 门票 ${money(casino.entryFee)}` : "支付门票进入"}</b></button>`).join("")}
+        ${casinos.map((casino, index) => { const feeChips = Math.ceil(casino.entryFee / 100); const canEnter = game.availableChips >= feeChips; return `<button class="casino-scene-choice ${casino.tone} casino-scene-choice-${index + 1}" data-casino="${casino.id}" ${canEnter ? "" : "disabled"}><span class="casino-scene-number">0${index + 1}</span><div><span>${casino.subtitle}</span><strong>${casino.name}</strong></div><dl><div><dt>门票</dt><dd>${feeChips} 枚筹码</dd></div><div><dt>牌桌</dt><dd>${casino.tableCount} 张</dd></div><div><dt>注码</dt><dd>${chips(casino.minBet)} - ${chips(casino.maxBet)}</dd></div></dl><b>${canEnter ? "支付筹码进入" : `筹码不足 · 需要 ${feeChips} 枚`}</b></button>`; }).join("")}
         <div class="casino-scene-footer">门票在进入赌场时支付 · 赌场内时间流速为每秒一分钟</div>
       </div>
     </section>
@@ -435,9 +740,14 @@ function lobbyTableContent(table: GameTable, casino: Casino): string {
   return `
     <div class="table-top"><strong>${table.name}</strong><span class="live" data-table-clock="${table.id}"><i></i>${Math.ceil((LOBBY_ROUND_MS - table.realtimeElapsedMs) / 1000)}s 开牌</span></div>
     <div class="table-shape"><span>庄</span><b>和</b><span>闲</span></div>
+    ${dealerProfileMarkup(table)}
     ${roadSheet(table, false, false, "expanded")}
-    <div class="table-meta"><span class="pattern ${pattern.id !== "none" ? "active" : ""}">${pattern.name}</span><span>${money(casino.minBet)} - ${money(casino.maxBet)}</span></div>
+    <div class="table-meta"><span class="pattern ${pattern.id !== "none" ? "active" : ""}">${pattern.name}</span><span>${chips(casino.minBet)} - ${chips(casino.maxBet)}</span><span>连战最多 ${casino.maxChainRounds} 局</span></div>
   `;
+}
+
+function dealerProfileMarkup(table: GameTable, compact = false): string {
+  return `<div class="dealer-profile ${compact ? "compact" : ""}"><span class="dealer-avatar" aria-hidden="true">荷</span><div><small>荷官</small><strong>${table.dealerName}</strong></div><div><small>持有现金</small><strong>${money(table.dealerCash)}</strong></div><div><small>抵押物</small><strong>${table.dealerRewardClaimed ? "已兑付" : table.dealerRewardKind === "chips" ? `${table.dealerRewardChips} 枚筹码` : "临时千术"}</strong></div></div>`;
 }
 
 function inlinePokerFace(card: Card): string {
@@ -477,52 +787,51 @@ function tableView(): string {
   const watchPending = inlineWatchActive ? game.pending ?? lastRound : null;
   const watchResult = inlineWatchSettled ? watchPending?.result ?? null : null;
   const stagedAmount = game.reservedBetAmount;
-  const denominations = chipDenominations(casino);
-  if (!denominations.includes(selectedChip)) selectedChip = denominations[0] ?? casino.minBet;
-  const markedPatterns = game.markedRoadPatterns(table.id);
-  const markedBookCount = markedRoadBookCount(table.id);
-  const createdRoads = game.roadCreationSequence(table.id);
-  const createdRoad = createdRoads[0] ?? null;
-  const recognizedPatternList = markedPatterns.length
-    ? `<div class="recognized-pattern-list">${markedPatterns.map((pattern) => `<span><b>${pattern.name}</b><i>预测${outcomeName(pattern.prediction)}</i></span>`).join("")}</div>`
-    : "";
-  const roadFeedback = roadMarkFeedback
-    ? `<div class="road-mark-feedback" role="status"><span>${roadMarkFeedback.message}</span><code>DEBUG · ${roadMarkFeedback.debug}</code></div>`
-    : "";
+  const minChipCount = Math.ceil(casino.minBet / 100);
+  const maxChipCount = Math.min(Math.floor(casino.maxBet / 100), game.availableChips);
+  const sliderMax = Math.max(minChipCount, maxChipCount);
+  selectedChipCount = Math.max(minChipCount, Math.min(sliderMax, selectedChipCount));
+  const draftAmount = selectedChipCount * 100;
   const confidenceMessage = !stagedBetSide
-    ? createdRoad ? `预想下一局${outcomeName(createdRoad)} · 信心待封盘结算` : "路数预判待定 · 信心待封盘结算"
+    ? "路数预判待定 · 信心待封盘结算"
     : `已押${outcomeName(stagedBetSide)} · 确认下注后才揭示信心变化`;
-  const zone = (side: Outcome, english: string, odds: string) => {
-    const active = stagedBetSide === side && stagedAmount > 0;
-    return `<button class="table-bet-zone ${side} ${active ? "has-wager" : ""}" data-bet-zone="${side}" aria-label="在${outcomeName(side)}区下注 ${money(selectedChip)}" ${inlineWatchActive ? "disabled" : ""}>
+  const zone = (side: Outcome, english: string, odds: string, legIndex = 0) => {
+    const active = chainRounds > 1 ? chainTargetSelected[legIndex] && chainTargets[legIndex] === side : stagedBetSide === side;
+    return `<button class="table-bet-zone ${side} ${active ? "has-wager" : ""}" data-bet-zone="${side}" data-bet-zone-index="${legIndex}" aria-label="第 ${legIndex + 1} 局选择${outcomeName(side)}" ${inlineWatchActive ? "disabled" : ""}>
       <span><b>${outcomeName(side)}</b><em>${english}</em><i>${odds}</i></span>
-      ${active ? `<span class="zone-wager"><i></i><i></i><i></i><strong>${money(stagedAmount)}</strong></span>` : ""}
+      ${active ? `<span class="zone-wager"><i></i><i></i><i></i><strong>${selectedChipCount} 枚</strong></span>` : ""}
     </button>`;
   };
-  const canConfirm = Boolean(stagedBetSide) && stagedAmount >= casino.minBet && stagedAmount <= casino.maxBet;
+  const chainBetRows = chainRounds > 1
+    ? `<div class="chain-bet-rows">${chainTargets.map((_, index) => `<div class="chain-bet-row"><strong>第 ${index + 1} 局</strong><div class="bet-zones">${zone("player", "PLAYER", "1:1", index)}${zone("tie", "TIE", "1:8", index)}${zone("banker", "BANKER", "1:0.95", index)}</div></div>`).join("")}</div>`
+    : "";
+  const selectedChainTargets = chainTargets.filter((_, index) => chainTargetSelected[index]);
+  const hasBetTarget = selectedChainTargets.length > 0;
+  const canConfirm = draftAmount >= casino.minBet && draftAmount <= casino.maxBet && game.availableChips >= selectedChipCount && hasBetTarget;
   return shell(`
     <section class="table-page">
-      <div class="table-header table-header-status"><span class="round-count">第 ${inlineWatchSettled ? table.round : table.round + 1} 局</span></div>
+      <div class="table-header table-header-status"><span class="round-count">第 ${inlineWatchSettled ? table.round : table.round + 1} 局 · 连战最多 ${casino.maxChainRounds} 局</span></div>
+      ${dealerProfileMarkup(table, true)}
       <div class="table-layout">
         <section class="betting-panel ${inlineWatchActive ? "inline-watching" : ""}">
-          <div class="table-felt ${inlineWatchActive ? "watch-active" : ""}">
-            <div class="table-session-meta"><span>${inlineWatchActive ? `旁观牌局 · ${inlineWatchStatus(watchPending!)}` : `限红 ${money(casino.minBet)} - ${money(casino.maxBet)}`}</span></div>
+          <div class="table-felt ${inlineWatchActive ? "watch-active" : ""} ${chainRounds > 1 ? "chain-betting" : ""}">
+            <div class="table-session-meta"><span>${inlineWatchActive ? `旁观牌局 · ${inlineWatchStatus(watchPending!)}` : `限注 ${chips(casino.minBet)} - ${chips(casino.maxBet)}`}</span></div>
             <div class="dealer-apron ${inlineWatchActive ? "inline-watch-apron" : ""}">${inlineWatchActive ? `${inlineWatchHand(watchPending!, "player")}<strong>${inlineWatchStatus(watchPending!)}</strong>${inlineWatchHand(watchPending!, "banker")}` : `<div class="table-hand-placement player"><span>PLAYER</span><i></i><i></i></div><span class="dealer-apron-gap" aria-hidden="true"></span><div class="table-hand-placement banker"><span>BANKER</span><i></i><i></i></div>`}</div>
-            <div class="bet-zones">${zone("player", "PLAYER", "1:1")}${zone("tie", "TIE", "1:8")}${zone("banker", "BANKER", "1:0.95")}</div>
+            ${chainRounds > 1 ? chainBetRows : `<div class="bet-zones">${zone("player", "PLAYER", "1:1")}${zone("tie", "TIE", "1:8")}${zone("banker", "BANKER", "1:0.95")}</div>`}
             ${watchResult ? `<div class="inline-watch-result ${watchResult.outcome}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭旁观结算"><i>${watchResult.outcome === "tie" ? "和" : outcomeName(watchResult.outcome)}</i><span>旁观结算</span><h2>${watchResult.outcome === "tie" ? "本局和局" : `${outcomeName(watchResult.outcome)}家胜`}</h2><p>庄 ${watchResult.bankerPoints} 点 · 闲 ${watchResult.playerPoints} 点</p><small>点击任意位置返回牌桌</small></div>` : ""}
           </div>
           <div class="bet-controls">
             <div class="chip-console">
-              <div class="chip-tray" aria-label="筹码面额">${denominations.map((amount, index) => `<button class="bet-chip chip-${index + 1} ${selectedChip === amount ? "selected" : ""}" data-chip="${amount}" aria-label="选择${money(amount)}筹码" ${inlineWatchActive ? "disabled" : ""}><span>${amount >= 1000 ? `${amount / 1000}K` : amount}</span></button>`).join("")}</div>
-              ${inlineWatchActive ? "" : stagedAmount > 0 ? `<div class="bet-command-bar">
+              <div class="chip-tray chip-count-slider" aria-label="选择筹码数量"><label><span>下注筹码</span><strong data-chip-count-value>${selectedChipCount} 枚</strong></label><input type="range" min="${minChipCount}" max="${sliderMax}" step="1" value="${selectedChipCount}" data-chip-count aria-label="选择下注筹码数量" ${inlineWatchActive || stagedAmount > 0 ? "disabled" : ""}><div><small>${minChipCount} 枚</small><small>${sliderMax} 枚</small></div></div>
+              ${inlineWatchActive ? "" : (stagedBetSide || chainTargetSelected.some(Boolean)) ? `<div class="bet-command-bar">
                 <button class="secondary" data-action="cancel-bet"><span>↶</span>取消</button>
-                <button class="primary" data-action="confirm-bet" ${canConfirm ? "" : "disabled"}><span>✓</span>确认</button>
+                <button class="primary" data-action="confirm-bet" data-bet-confirm ${canConfirm ? "" : "disabled"}><span>✓</span>确认</button>
               </div>` : `<div class="bet-command-bar single-action"><button class="secondary chip-watch-action" data-action="watch">旁观本局</button></div>`}
             </div>
             <div class="confidence-readout"><span>当前信心 ${Math.round(game.confidence * 100)}%</span><strong>${confidenceMessage}</strong></div>
           </div>
         </section>
-        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2><div class="road-mark-actions">${createdRoad ? `<span class="road-creation-status active">已创造 ${createdRoads.length} 局 · 下一局${outcomeName(createdRoad)}</span>` : ""}${markedBookCount ? `<span class="pattern active">已标记 ${markedBookCount} 路 · DEBUG 有效 ${markedPatterns.length} 路</span><button class="clear-road-marks" data-action="clear-road-marks">全清标记</button>` : ""}</div></div>${roadFeedback}${recognizedPatternList}${roadSheet(table, false, !inlineWatchActive, "expanded")}</aside>
+        <aside class="road-panel"><div class="panel-title"><h2>牌路</h2></div>${roadSheet(table, false, false, "expanded")}</aside>
       </div>
       ${roadCreationResolutionView()}
     </section>
@@ -551,6 +860,23 @@ function dealSequence(pending: PendingRound): DealtCard[] {
   if (playerCards[2]) sequence.push({ card: playerCards[2], side: "player", handIndex: 2 });
   if (bankerCards[2]) sequence.push({ card: bankerCards[2], side: "banker", handIndex: 2 });
   return sequence;
+}
+
+function pendingChainLeg(index: number): PendingRound | null {
+  const chain = game.pendingChain;
+  const current = game.pending ?? lastRound;
+  if (!chain || !current) return null;
+  const leg = chain.legs[index];
+  if (!leg) return null;
+  if (index === chain.currentLegIndex) return current;
+  return {
+    ...current,
+    result: leg.result,
+    bet: { side: leg.target, amount: chain.stake },
+    confidence: 0,
+    confidencePrediction: null,
+    betCurrency: "chip",
+  };
 }
 
 function playerOwnedSide(pending: PendingRound): Side | null {
@@ -596,74 +922,6 @@ function liveBaccaratScore(pending: PendingRound): string {
   return `<div class="live-baccarat-score"><div class="live-score-summary"><span>实时牌势</span><strong>${summary}</strong></div>${item("banker", banker, bankerRelation)}${item("player", player, playerRelation)}</div>`;
 }
 
-function forecastLabel(forecast: BaccaratRevealForecast, pending: PendingRound): { label: string; className: string } {
-  if (forecast.kind === "pending") return { label: "待定", className: "pending" };
-  if (forecast.kind === "draw") return { label: `${outcomeName(forecast.side)}补牌`, className: "draw" };
-  if (forecast.outcome === "tie") {
-    return pending.bet?.side === "tie" ? { label: "赢", className: "win" } : { label: "和", className: "tie" };
-  }
-  if (!pending.bet) return { label: `${outcomeName(forecast.outcome)}赢`, className: forecast.outcome };
-  return forecast.outcome === pending.bet.side ? { label: "赢", className: "win" } : { label: "输", className: "lose" };
-}
-
-interface ForecastRankCandidate {
-  labels: string[];
-  value: number;
-  faceGroup?: boolean;
-}
-
-interface ForecastRankGroup {
-  candidates: ForecastRankCandidate[];
-  result: ReturnType<typeof forecastLabel>;
-}
-
-const forecastRankCandidates: ForecastRankCandidate[] = [
-  { labels: ["A"], value: 1 },
-  ...Array.from({ length: 8 }, (_, index) => ({ labels: [String(index + 2)], value: index + 2 })),
-  { labels: ["10", "J", "Q", "K"], value: 0, faceGroup: true },
-];
-
-function forecastRankLabel(group: ForecastRankGroup): string {
-  const labels = group.candidates.flatMap((candidate) => candidate.labels);
-  if (labels.length === 13) return "全牌型";
-  const includesFaceCards = group.candidates.some((candidate) => candidate.faceGroup);
-  if (includesFaceCards && labels.length === 4) return "10/J/Q/K";
-  if (includesFaceCards) return `${labels[0]}-K`;
-  if (labels.length === 1) return labels[0]!;
-  return `${labels[0]}-${labels.at(-1)}`;
-}
-
-function currentCardForecast(pending: PendingRound): string {
-  if (!SHOW_LAST_CARD_FORECAST) return "";
-  if (dealStage === "settled" || dealStage === "animating" || dealStage === "drawing-card") return "";
-  const remaining = Array.from({ length: dealtCardCount }, (_, index) => index).filter((index) => !revealedCardIndices.has(index));
-  if (remaining.length !== 1) return "";
-  const index = remaining[0]!;
-  const entry = dealSequence(pending)[index]!;
-  const player = revealedHandInfo(pending, "player").values;
-  const banker = revealedHandInfo(pending, "banker").values;
-  const groups = forecastRankCandidates.reduce<ForecastRankGroup[]>((result, candidate) => {
-    const forecast = forecastLabel(forecastBaccaratReveal(player, banker, entry.side, entry.handIndex, candidate.value), pending);
-    const previous = result.at(-1);
-    const sameResult = previous?.result.label === forecast.label && previous.result.className === forecast.className;
-    const canMerge = sameResult;
-    if (canMerge) previous!.candidates.push(candidate);
-    else result.push({ candidates: [candidate], result: forecast });
-    return result;
-  }, []);
-  const firstGroup = groups[0];
-  const allSameResult = firstGroup && groups.every((group) => group.result.label === firstGroup.result.label && group.result.className === firstGroup.result.className);
-  if (allSameResult && groups.length > 1) {
-    groups.splice(0, groups.length, { candidates: groups.flatMap((group) => group.candidates), result: firstGroup.result });
-  }
-  const values = groups.map((group) => {
-    const ranks = forecastRankLabel(group);
-    return `<div class="forecast-value ${group.result.className} ${group.candidates.some((candidate) => candidate.faceGroup) ? "face-group" : ""}" aria-label="${ranks}：${group.result.label}"><b>${ranks}</b><span>${group.result.label}</span></div>`;
-  }).join("");
-  const perspective = pending.bet ? `以押${outcomeName(pending.bet.side)}判定` : "旁观判定";
-  return `<section class="card-forecast"><header><div><span>末张判势</span><strong>开${outcomeName(entry.side)}家第 ${entry.handIndex + 1} 张</strong></div><small>${perspective}</small></header><div class="forecast-values" style="--forecast-count:${groups.length}">${values}</div></section>`;
-}
-
 function confidenceBreakdownView(pending: PendingRound): string {
   if (!pending.bet) return "";
   const breakdown = pending.confidenceBreakdown;
@@ -678,35 +936,92 @@ function confidenceBreakdownView(pending: PendingRound): string {
   const activeRows = rows.filter(([, value]) => Math.abs(value) > 1e-9);
   return `<div class="confidence-breakdown"><b>基础 ${Math.round(breakdown.base * 100)}%</b>${activeRows.length
     ? activeRows.map(([label, value]) => `<span class="${value > 0 ? "gain" : "loss"}">${label} ${value > 0 ? "+" : ""}${Math.round(value * 100)}%</span>`).join("")
-    : `<span>无额外修正</span>`}<strong>封盘 ${Math.round(pending.confidence * 100)}%</strong></div>`;
+    : `<span>无额外修正</span>`}</div>`;
+}
+
+function cheatSkillActionsMarkup(locked = false): string {
+  return `${game.availableCheatSkills.map((id) => { const definition = cheatSkillDefinitions.find((item) => item.id === id); return `<button type="button" data-cheat-skill="${id}" ${locked ? "disabled" : ""} title="${definition?.description ?? "选择后直接点击目标牌"}">${definition?.name ?? id}</button>`; }).join("")}<button type="button" class="cheat-cancel-action hidden" data-action="cancel-cheat" data-cheat-cancel>取消出千</button>`;
+}
+
+function bindCheatSkillActions(root: ParentNode = app): void {
+  root.querySelectorAll<HTMLElement>("[data-cheat-skill]").forEach((element) => {
+    if (element.dataset.cheatBound === "true") return;
+    element.dataset.cheatBound = "true";
+    element.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openCheatTargetPicker(element.dataset.cheatSkill as CheatSkillId);
+    });
+  });
+}
+
+function syncAvailableCheatSkillUi(): void {
+  armedCheatSkill = null;
+  document.body.classList.remove("cheat-target-armed");
+  restoreCardSelectionAfterCheatCancel();
+  app.querySelectorAll<HTMLElement>(".cheat-controls").forEach((control) => {
+    const locked = control.classList.contains("disabled");
+    const label = control.querySelector<HTMLElement>("[data-cheat-armed-label]");
+    if (label) label.textContent = "出千";
+    const actions = control.querySelector<HTMLElement>(".cheat-skill-actions");
+    if (actions) actions.innerHTML = cheatSkillActionsMarkup(locked);
+  });
+  bindCheatSkillActions();
+}
+
+function chainSettlementView(settlement: ChainSettlementView): string {
+  const legMarkup = settlement.legs.map((leg) => {
+    const result = leg.result;
+    const hit = result.outcome === "tie" || result.outcome === leg.target;
+    const status = leg.settled ? result.outcome === "tie" ? "和局 · 不计赔率" : hit ? "押中" : "未中" : "未执行";
+    const outcomeClass = !leg.settled ? "pending" : result.outcome === "tie" ? "tie" : hit ? "hit" : "miss";
+    const hand = (side: Side, label: string, cards: Card[]) => `<div><span>${label} · ${side === "banker" ? result.bankerPoints : result.playerPoints} 点</span><strong>${cards.map(cardLabel).join(" · ")}</strong></div>`;
+    return `<article class="chain-settlement-leg ${outcomeClass}"><header><strong>第 ${leg.index + 1} 局</strong><span>押${outcomeName(leg.target)} · ${status}</span></header><div class="chain-settlement-hands">${hand("player", "闲家", result.playerCards)}${hand("banker", "庄家", result.bankerCards)}</div><b>${outcomeName(result.outcome)}${result.outcome === "tie" ? "和局" : "家胜"}</b></article>`;
+  }).join("");
+  const verdict = settlement.won ? "连战成功" : "连战失败";
+  const seal = settlement.won ? "胜" : "负";
+  const amount = settlement.won ? `现金收益 +${money(settlement.payout)}` : `损失 ${chips(settlement.stake)}`;
+  return `<div class="table-settlement chain-settlement ${settlement.won ? "hit" : "miss"}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭连战结算"><section class="settlement-verdict"><i>${seal}</i><span>本场连战 · ${settlement.plannedRounds} 局</span><b>${verdict}</b><strong>${amount}</strong><small>有效 ${settlement.effectiveRounds} 局 · 和局 ${settlement.ties} 局</small></section><div class="chain-settlement-legs">${legMarkup}</div><small class="settlement-dismiss-hint">点击任意位置返回牌桌</small></div>`;
 }
 
 function dealingView(): string {
   const pending = game.pending ?? lastRound!;
   const table = game.table(tableId);
   const sequence = dealSequence(pending);
-  const isWatching = pending.bet === null;
   const result = dealStage === "settled" ? pending.result : null;
-  const confidenceFeedback = `封盘结算 · ${Math.round(pending.confidence * 100)}%`;
   const delta = lastSettlement?.delta ?? 0;
   const betFeedback = !pending.bet ? "旁观完成" : result?.outcome === pending.bet.side ? `押中${outcomeName(pending.bet.side)}` : result?.outcome === "tie" ? "和局退注" : `押${outcomeName(pending.bet.side)}未中`;
   const settlementKind = !pending.bet ? "watch" : result?.outcome === pending.bet.side ? "hit" : result?.outcome === "tie" ? "push" : "miss";
   const settlementSeal = settlementKind === "hit" ? "中" : settlementKind === "miss" ? "负" : settlementKind === "push" ? "和" : "看";
-  const settlementAmount = settlementKind === "hit" ? `盈利 +${money(delta)}` : settlementKind === "miss" ? `损失 -${money(Math.abs(delta))}` : settlementKind === "push" ? "本金已退回" : "本局未下注";
+  const settlementAmount = settlementKind === "hit" ? `现金收益 +${money(delta)}` : settlementKind === "miss" ? `损失 ${chips(pending.bet?.amount ?? 0)}` : settlementKind === "push" ? "筹码已退回" : "本局未下注";
   const chipSettlementKind = !pending.bet ? null : pending.result.outcome === pending.bet.side ? "win" : pending.result.outcome === "tie" ? "push" : "lose";
-  const chipTransferLabel = chipSettlementKind === "win" ? `荷官赔付 · +${money(Math.max(0, delta))}` : chipSettlementKind === "lose" ? `荷官收注 · ${money(pending.bet?.amount ?? 0)}` : chipSettlementKind === "push" ? "和局退注 · 本金返还" : "";
-  const statusTitle = dealStage === "settled" ? result!.outcome === "tie" ? "和局" : `${outcomeName(result!.outcome)}家胜` : dealStage === "settling-chips" ? chipTransferLabel : dealStage === "animating" ? "荷官发牌" : dealStage === "drawing-card" ? `${outcomeName(sequence[dealtCardCount - 1]!.side)}家补牌` : dealStage === "dealer-revealing" ? "荷官开牌" : `剩余 ${dealtCardCount - revealedCardIndices.size} 张未开`;
+  const chipTransferLabel = chipSettlementKind === "win" ? `荷官赔付 · +${money(Math.max(0, delta))}` : chipSettlementKind === "lose" ? `荷官收注 · ${chips(pending.bet?.amount ?? 0)}` : chipSettlementKind === "push" ? "和局退注 · 筹码返还" : "";
+  const awaitingCheatLegs = awaitingCheatLegIndices();
+  const chainCanContinueCheating = awaitingCheatLegs.length > 0 || Boolean(game.pendingChain?.legs.some((leg) => !leg.settled) && lastSettlement?.chainContinues);
+  const cheatLocked = (dealStage === "settled" || dealStage === "settling-chips") && !chainCanContinueCheating;
+  const cheatControls = pending.bet && game.availableCheatSkills.length
+    ? `<div class="cheat-controls ${cheatLocked ? "disabled" : ""}"><div class="cheat-controls-heading"><strong>选择千术后点击目标牌</strong><small data-cheat-armed-label>${cheatLocked ? "本局已结算 · 千术不可用" : armedCheatSkill ? cheatTargetInstruction(armedCheatSkill) : "出千"}</small></div><div class="cheat-skill-actions">${cheatSkillActionsMarkup(cheatLocked)}</div></div>`
+    : "";
+  const giveUpControl = awaitingCheatLegs.length
+    ? `<div class="give-up-actions"><button type="button" class="give-up-action" data-action="give-up">放弃本场</button></div>`
+    : "";
+  const selectedChainIndex = game.pendingChain && game.pending ? game.pendingChain.currentLegIndex : -1;
+  const chainBoards = game.pendingChain
+    ? `<div class="chain-table-grid" style="--chain-count:${game.pendingChain.legs.length}">${game.pendingChain.legs.map((leg, index) => { const settledIcon = leg.settled ? leg.result.outcome === "tie" ? "和" : "胜" : ""; const danger = awaitingCheatLegs.includes(index); return `<article class="chain-table-board ${leg.settled ? "done" : index === selectedChainIndex ? "active" : "queued"}" aria-label="连战第 ${index + 1} 局${leg.settled ? ` · ${chainLegResultLabel(leg)}` : ""}"><header><button type="button" class="chain-leg-select" data-chain-leg-select="${index}" ${leg.settled ? "disabled" : ""}>第 ${index + 1} 局</button><span class="chain-leg-result ${leg.settled ? "settled" : ""}">${chainLegResultLabel(leg)}</span></header>${danger ? `<div class="chain-danger-badge" aria-label="本局等待出千"><strong>危</strong><span>可出千</span></div>` : ""}${settledIcon ? `<div class="chain-settlement-badge ${leg.result.outcome === "tie" ? "tie" : "win"}" aria-label="${leg.result.outcome === "tie" ? "和局" : "胜利"}"><strong>${settledIcon}</strong><span>${leg.result.outcome === "tie" ? "和局 · 退注" : "押中"}</span></div>` : ""}<div class="chain-stage-host" data-chain-stage="${index}" id="chain-stage-${index}" aria-label="连战第 ${index + 1} 局牌桌"></div><div class="chain-leg-report" data-chain-leg-report="${index}">${chainLegReportMarkup(index)}</div></article>`; }).join("")}</div>`
+    : `<div id="table-3d-stage" aria-label="3D百家乐牌桌"></div>`;
+  const statusTitle = dealStage === "settled" ? result!.outcome === "tie" ? "和局" : `${outcomeName(result!.outcome)}家胜` : dealStage === "settling-chips" ? chipTransferLabel : dealStage === "awaiting-cheat" ? "本局未中 · 还可出千" : dealStage === "animating" ? "荷官发牌" : dealStage === "drawing-card" ? `${outcomeName(sequence[dealtCardCount - 1]!.side)}家补牌` : dealStage === "dealer-revealing" ? "荷官开牌" : dealStage === "awaiting-card" ? "等待开牌" : "等待操作";
+  const globalDealStatus = game.pendingChain
+    ? `<div class="deal-status chain-global-status"><div class="chain-global-confidence"><span>全局信心 ${Math.round(game.confidence * 100)}%</span><b class="global-wager">本场 ${chips(pending.bet?.amount ?? 0)}</b>${confidenceBreakdownView(pending)}</div>${cheatControls}${giveUpControl}</div>`
+    : `<div class="deal-status single-global-status"><div class="deal-status-title">${dealStage === "settled" ? `<p class="eyebrow">${betFeedback}</p>` : ""}<h1>${statusTitle}</h1>${pending.bet ? `<small class="global-wager">本场 ${chips(pending.bet.amount)}</small>` : ""}${pending.bet && dealStage === "awaiting-card" ? `<small class="deal-operation-hint">操作：点击牌面开牌 · 点击聚焦牌面快速开牌 · 拖动手动咪牌</small>` : ""}</div>${dealStage === "settled" ? "" : liveBaccaratScore(pending)}<span>${dealStage === "settled" ? `庄 ${result!.bankerPoints} 点 · 闲 ${result!.playerPoints} 点` : pending.bet ? "" : "本局全部由荷官开牌 · 信心不变"}</span>${dealStage !== "settled" ? confidenceBreakdownView(pending) : ""}${cheatControls}${giveUpControl}</div>`;
   return shell(`
     <section class="table-page table-dealing immersive-dealing ${dealStage}">
       <div class="table-header table-header-status"><span class="round-count">第 ${dealStage === "settled" || dealStage === "settling-chips" ? table.round : table.round + 1} 局</span></div>
       <div class="table-layout">
         <section class="betting-panel live-deal-panel">
-          <div class="deal-status"><div class="deal-status-title"><p class="eyebrow">${dealStage === "settled" ? betFeedback : isWatching ? "旁观牌局" : `已押${outcomeName(pending.bet!.side)} · ${money(pending.bet!.amount)}`}</p><h1>${statusTitle}</h1></div>${dealStage === "settled" ? "" : liveBaccaratScore(pending)}<span>${dealStage === "settled" ? `庄 ${result!.bankerPoints} 点 · 闲 ${result!.playerPoints} 点` : pending.bet ? confidenceFeedback : "本局全部由荷官开牌 · 信心不变"}</span>${dealStage !== "settled" ? confidenceBreakdownView(pending) : ""}</div>
-          <div class="immersive-table-stage">
-            <div id="table-3d-stage" aria-label="3D百家乐牌桌"></div>
-            ${pending.bet && dealStage !== "settling-chips" ? `<div class="active-bet-marker ${pending.bet.side}"><i></i><span>押${outcomeName(pending.bet.side)}</span><strong>${money(pending.bet.amount)}</strong></div>` : ""}
+          ${globalDealStatus}
+          <div class="immersive-table-stage ${game.pendingChain ? "has-chain-boards" : ""}">
+            ${chainBoards}
             ${dealStage === "settling-chips" ? `<div class="chip-transfer-callout ${chipSettlementKind}"><span>${chipSettlementKind === "win" ? "PAYOUT" : chipSettlementKind === "lose" ? "COLLECT" : "PUSH"}</span><strong>${chipTransferLabel}</strong></div>` : ""}
-            ${dealStage === "settled" ? `<div class="table-settlement ${settlementKind}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭结算"><section class="settlement-verdict"><i>${settlementSeal}</i><span>本局 ${outcomeName(result!.outcome)}${result!.outcome === "tie" ? "局" : "家胜"}</span><b>${betFeedback}</b><strong>${settlementAmount}</strong>${pending.bet ? `<small>押${outcomeName(pending.bet.side)} · ${money(pending.bet.amount)}</small>` : ""}${lastSettlement?.income ? `<em>餐厅同期到账 +${money(lastSettlement.income)}</em>` : ""}</section><div class="settlement-hands"><div><span>庄家 · ${result!.bankerPoints} 点</span><strong>${result!.bankerCards.map(cardLabel).join(" · ")}</strong></div><div><span>闲家 · ${result!.playerPoints} 点</span><strong>${result!.playerCards.map(cardLabel).join(" · ")}</strong></div></div><small class="settlement-dismiss-hint">点击任意位置返回牌桌</small></div>` : ""}
+            ${dealStage === "settled" && lastChainSettlement ? chainSettlementView(lastChainSettlement) : dealStage === "settled" && !lastSettlement?.chainContinues ? `<div class="table-settlement ${settlementKind}" data-action="dismiss-settlement" role="button" tabindex="0" aria-label="关闭结算"><section class="settlement-verdict"><i>${settlementSeal}</i><span>本局 ${outcomeName(result!.outcome)}${result!.outcome === "tie" ? "局" : "家胜"}</span><b>${betFeedback}</b><strong>${settlementAmount}</strong>${pending.bet ? `<small>押${outcomeName(pending.bet.side)} · ${chips(pending.bet.amount)}</small>` : ""}${lastSettlement?.income ? `<em>餐厅同期到账 +${money(lastSettlement.income)}</em>` : ""}</section><div class="settlement-hands"><div><span>庄家 · ${result!.bankerPoints} 点</span><strong>${result!.bankerCards.map(cardLabel).join(" · ")}</strong></div><div><span>闲家 · ${result!.playerPoints} 点</span><strong>${result!.playerCards.map(cardLabel).join(" · ")}</strong></div></div><small class="settlement-dismiss-hint">点击任意位置返回牌桌</small></div>` : ""}
           </div>
         </section>
       </div>
@@ -717,10 +1032,10 @@ function dealingView(): string {
 function gameOverView(): string {
   return shell(`
     <section class="game-over-page">
-      <p class="eyebrow">所有筹码与家底均已耗尽</p>
+      <p class="eyebrow">现金、筹码与抵押额度均已耗尽</p>
       <div class="game-over-mark">终局</div>
       <h1>赌桌不再赊账</h1>
-      <p>餐厅已经典当，可用资金归零。本次试炼到此结束。</p>
+      <p>餐厅已经没有可用抵押额度，手上的现金和筹码也归零。本次试炼到此结束。</p>
       <button class="primary" data-action="restart">重新开始</button>
     </section>
   `);
@@ -756,8 +1071,9 @@ function renderDebugMenu(): void {
       <span><strong>${label}</strong><small>${description}</small></span>
       <span class="debug-number-input"><input type="number" min="${min}" step="${step}" value="${value}" data-debug-setting="${key}" data-debug-scale="${scale}"><i>${unit}</i></span>
     </label>`;
-  const cashControl = `<section class="debug-cash-control"><div><span>当前资金</span><strong>${money(game.cash)}</strong></div><div><button type="button" data-debug-cash-adjust="-100000" ${game.cash <= 0 ? "disabled" : ""}>扣钱 -100,000</button><button type="button" data-debug-cash-adjust="100000">加钱 +100,000</button></div></section>`;
-  overlay.innerHTML = `<section class="debug-menu" role="dialog" aria-modal="true" aria-label="测试调试菜单"><header><div><span>TEST TOOLS</span><h2>测试调试</h2></div><button type="button" data-debug-close aria-label="关闭调试菜单">×</button></header><div class="debug-menu-body"><div class="debug-row debug-confidence-control"><div><strong>基础信心</strong><small>路数、下注和连胜仍会参与最终结算。</small></div><output data-debug-base-confidence-value>${basePercent}%</output><div class="debug-slider-row"><input type="range" min="0" max="100" value="${basePercent}" style="--debug-confidence:${basePercent}%" data-debug-base-confidence aria-label="调整基础信心"><div><span>0%</span><span>50%</span><span>100%</span></div></div><label class="debug-switch"><input type="checkbox" data-debug-confidence-lock ${game.debugConfidenceForced ? "checked" : ""}><i></i><span>锁定 100% 信心</span></label></div><section class="debug-settings"><h3>经营与时间</h3>${debugNumberField("餐厅周期收益", "当前等级每次结算实际到账", "restaurantIncomePerCycle", config.restaurantIncomePerCycle, 0, 100, "元")}${debugNumberField("餐厅结算周期", "按游戏世界时间累计", "restaurantCycleWorldMinutes", config.restaurantCycleWorldMinutes, 1, 1, "游戏分钟")}${debugNumberField("赌场外时间流速", "每 1 个现实秒推进的游戏时间", "worldMinutesPerRealSecondOutsideCasino", config.worldMinutesPerRealSecondOutsideCasino, 0, 1, "游戏分钟/秒")}${debugNumberField("赌场内时间流速", "每 1 个现实秒推进的游戏时间", "worldMinutesPerRealSecondInsideCasino", config.worldMinutesPerRealSecondInsideCasino, 0, 0.1, "游戏分钟/秒")}</section><section class="debug-settings"><h3>睡眠与疲劳</h3>${debugNumberField("每日睡眠债务", "每天 00:00 新增", "sleepDebtPerMidnightWorldMinutes", config.sleepDebtPerMidnightWorldMinutes / 60, 0, 0.5, "小时", 60)}${debugNumberField("疲劳触发阈值", "累计达到该数值后进入睡眠不足", "sleepDebtThresholdWorldMinutes", config.sleepDebtThresholdWorldMinutes / 60, 1 / 60, 0.5, "小时", 60)}</section></div><footer><div><span>${game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心"}</span><strong data-debug-confidence-value>${confidencePercent}%</strong></div><button class="debug-reset-all" type="button" data-debug-reset-all>恢复全部默认</button><small>按 ESC 关闭</small></footer></section>`;
+  const debugCheatNames = game.availableCheatSkills.map((id) => cheatSkillDefinitions.find((definition) => definition.id === id)?.name ?? id).join(" · ");
+  const cashControl = `<section class="debug-cash-control"><div><span>当前资金</span><strong>${money(game.cash)}</strong></div><div><span>当前筹码</span><strong>${game.availableChips} 枚</strong></div><div><button type="button" data-debug-cash-adjust="-100000" ${game.cash <= 0 ? "disabled" : ""}>扣钱 -100,000</button><button type="button" data-debug-cash-adjust="100000">加钱 +100,000</button><button type="button" data-debug-chip-adjust="-10" ${game.availableChips <= 0 ? "disabled" : ""}>减 10 筹码</button><button type="button" data-debug-chip-adjust="10">加 10 筹码</button></div></section><section class="debug-cheat-control"><div><span>当前今日千术</span><strong data-debug-cheat-list>${debugCheatNames}</strong><small data-debug-cheat-feedback>点击顶部按钮可重新抽取两种千术</small></div></section>`;
+  overlay.innerHTML = `<section class="debug-menu" role="dialog" aria-modal="true" aria-label="测试调试菜单"><header><div><span>TEST TOOLS</span><h2>测试调试</h2></div><div class="debug-menu-actions"><button type="button" data-debug-cheat-reset>重置千术</button><button type="button" data-debug-close aria-label="关闭调试菜单">×</button></div></header><div class="debug-menu-body"><div class="debug-row debug-confidence-control"><div><strong>基础信心</strong><small>当前版本仅用于调试神助概率显示。</small></div><output data-debug-base-confidence-value>${basePercent}%</output><div class="debug-slider-row"><input type="range" min="0" max="100" value="${basePercent}" style="--debug-confidence:${basePercent}%" data-debug-base-confidence aria-label="调整基础信心"><div><span>0%</span><span>50%</span><span>100%</span></div></div><label class="debug-switch"><input type="checkbox" data-debug-confidence-lock ${game.debugConfidenceForced ? "checked" : ""}><i></i><span>锁定 100% 信心</span></label></div><section class="debug-settings"><h3>经营与时间</h3>${debugNumberField("周期筹码产出", "调试时每周期固定产出并跳过概率判定", "restaurantIncomePerCycle", config.restaurantIncomePerCycle, 0, 100, "枚")}${debugNumberField("餐厅结算周期", "按游戏世界时间累计", "restaurantCycleWorldMinutes", config.restaurantCycleWorldMinutes, 1, 1, "游戏分钟")}${debugNumberField("赌场外时间流速", "每 1 个现实秒推进的游戏时间", "worldMinutesPerRealSecondOutsideCasino", config.worldMinutesPerRealSecondOutsideCasino, 0, 1, "游戏分钟/秒")}${debugNumberField("赌场内时间流速", "每 1 个现实秒推进的游戏时间", "worldMinutesPerRealSecondInsideCasino", config.worldMinutesPerRealSecondInsideCasino, 0, 0.1, "游戏分钟/秒")}</section><section class="debug-settings"><h3>睡眠与疲劳</h3>${debugNumberField("每日睡眠债务", "每天 00:00 新增", "sleepDebtPerMidnightWorldMinutes", config.sleepDebtPerMidnightWorldMinutes / 60, 0, 0.5, "小时", 60)}${debugNumberField("疲劳触发阈值", "累计达到该数值后进入睡眠不足", "sleepDebtThresholdWorldMinutes", config.sleepDebtThresholdWorldMinutes / 60, 1 / 60, 0.5, "小时", 60)}</section></div><footer><div><span>${game.debugConfidenceForced ? "锁定覆盖已启用" : "当前总信心"}</span><strong data-debug-confidence-value>${confidencePercent}%</strong></div><button class="debug-reset-all" type="button" data-debug-reset-all>恢复全部默认</button><small>按 ESC 关闭</small></footer></section>`;
   overlay.querySelector<HTMLElement>(".debug-menu-body")!.insertAdjacentHTML("afterbegin", cashControl);
   document.body.append(overlay);
   overlay.querySelector<HTMLElement>("[data-debug-close]")!.addEventListener("click", () => {
@@ -780,9 +1096,31 @@ function renderDebugMenu(): void {
       else {
         const wallet = document.querySelector<HTMLElement>(".wallet strong");
         if (wallet) wallet.textContent = money(game.cash);
+        const chipWallet = document.querySelector<HTMLElement>(".chip-wallet strong");
+        if (chipWallet) chipWallet.textContent = `${game.availableChips} 枚`;
       }
       renderDebugMenu();
     });
+  });
+  overlay.querySelectorAll<HTMLButtonElement>("[data-debug-chip-adjust]").forEach((button) => {
+    button.addEventListener("click", () => {
+      game.adjustDebugChips(Number(button.dataset.debugChipAdjust));
+      if (view !== "dealing") render();
+      else {
+        const chipWallet = document.querySelector<HTMLElement>(".chip-wallet strong");
+        if (chipWallet) chipWallet.textContent = `${game.availableChips} 枚`;
+      }
+      renderDebugMenu();
+    });
+  });
+  overlay.querySelector<HTMLButtonElement>("[data-debug-cheat-reset]")!.addEventListener("click", () => {
+    const skills = game.rollDailyCheatSkills();
+    const names = skills.map((id) => cheatSkillDefinitions.find((definition) => definition.id === id)?.name ?? id).join(" · ");
+    game.notice = `已重置今日千术 · ${names}`;
+    overlay.querySelector<HTMLElement>("[data-debug-cheat-list]")!.textContent = names;
+    overlay.querySelector<HTMLElement>("[data-debug-cheat-feedback]")!.textContent = "已重新抽取";
+    if (view === "dealing") syncAvailableCheatSkillUi();
+    else render();
   });
   overlay.querySelectorAll<HTMLInputElement>("[data-debug-setting]").forEach((input) => {
     input.addEventListener("change", () => {
@@ -843,6 +1181,8 @@ function render(): void {
   viewTimers.forEach((timer) => window.clearTimeout(timer));
   viewTimers = [];
   tableScene?.dispose();
+  chainScenes.forEach((scene) => { if (scene !== tableScene) scene.dispose(); });
+  chainScenes.clear();
   tableScene = null;
   const content = view === "map" ? mapView() : view === "restaurant" ? restaurantView() : view === "skills" ? skillsView() : view === "casino-select" ? casinoSelectView() : view === "lobby" ? lobbyView() : view === "table" ? tableView() : view === "dealing" ? dealingView() : gameOverView();
   app.innerHTML = content;
@@ -882,8 +1222,54 @@ function startRestTransition(mode: RestMode = "natural"): void {
 
 function settleOnTable(): void {
   const pending = game.pending!;
+  const chainBeforeSettlement = game.pendingChain;
+  const chainIndex = chainBeforeSettlement?.currentLegIndex ?? null;
+  const chainSnapshot = chainBeforeSettlement ? {
+    stake: chainBeforeSettlement.stake,
+    plannedRounds: chainBeforeSettlement.plannedRounds,
+    legs: chainBeforeSettlement.legs.map((leg) => ({
+      index: leg.index,
+      target: leg.target,
+      result: leg.result,
+      settled: leg.settled || leg.index === chainIndex,
+    })),
+  } : null;
   lastRound = pending;
   lastSettlement = game.settle();
+  if (lastSettlement.chainContinues) {
+    lastChainSettlement = null;
+    saveActiveChainLegUi();
+    activeChainLegIndex = null;
+    revealedCardIndices.clear();
+    divineCheckedStages.clear();
+    divineRevealFeedback.clear();
+    dealtCardCount = 4;
+    dealStage = "settled";
+    view = "dealing";
+    render();
+    return;
+  }
+  if (lastSettlement.chainCompleted) {
+    if (chainSnapshot) {
+      const ties = chainSnapshot.legs.filter((leg) => leg.result.outcome === "tie").length;
+      lastChainSettlement = {
+        ...chainSnapshot,
+        ties,
+        effectiveRounds: chainSnapshot.plannedRounds - ties,
+        won: lastSettlement.delta > 0,
+        payout: Math.max(0, lastSettlement.delta),
+      };
+    } else {
+      lastChainSettlement = null;
+    }
+    chainLegUiStates.clear();
+    activeChainLegIndex = null;
+  }
+  if (lastSettlement.dealerReward) {
+    game.notice = lastSettlement.dealerReward.kind === "chips"
+      ? `荷官抵押奖励 · 获得 ${lastSettlement.dealerReward.amount} 枚筹码`
+      : "荷官抵押奖励 · 获得临时千术";
+  }
   roadCreationFailure = lastSettlement.roadCreation?.matched === false ? lastSettlement.roadCreation : null;
   if (lastSettlement.roadCreation) roadMarkFeedback = null;
   divineSpecialPending = divineActivationsThisRound >= 3 && lastSettlement.delta > 0;
@@ -895,12 +1281,73 @@ function settleOnTable(): void {
 function setupDealing(): void {
   const pending = game.pending ?? lastRound!;
   const casino = casinos.find((item) => item.id === casinoId)!;
-  const host = document.querySelector<HTMLElement>("#table-3d-stage");
-  if (!host) return;
-  tableScene = new TableScene(host);
+  const denominations = chipDenominations(casino);
+  const recordedWagerTotal = roundWagerChips.reduce((sum, chip) => sum + chip.value, 0);
+  const wagerChipsFor = (legPending: PendingRound): TableChip[] => legPending.bet && recordedWagerTotal === legPending.bet.amount
+    ? roundWagerChips
+    : composeChipAmount(legPending.bet?.amount ?? 0, denominations);
+
+  if (game.pendingChain) {
+    const activeIndex = game.pending ? game.pendingChain.currentLegIndex : -1;
+    game.pendingChain.legs.forEach((_, index) => {
+      const host = document.querySelector<HTMLElement>(`[data-chain-stage="${index}"]`);
+      const legPending = pendingChainLeg(index);
+      if (!host || !legPending) return;
+      const scene = new TableScene(host);
+      chainScenes.set(index, scene);
+      const sequence = dealSequence(legPending);
+      if (index !== activeIndex) {
+        const legState = chainLegUiStates.get(index);
+        const completed = game.pendingChain!.legs[index]!.settled;
+        const shownCount = completed ? sequence.length : legState?.dealtCardCount ?? 4;
+        const revealed = completed ? new Set(sequence.map((_, cardIndex) => cardIndex)) : new Set(legState?.revealedCardIndices ?? []);
+        const animateInitialDeal = !legState && !completed;
+        scene.deal(sequence.slice(0, shownCount), revealed, () => {
+          if (animateInitialDeal) {
+            chainLegUiStates.set(index, {
+              dealtCardCount: shownCount,
+              revealedCardIndices: new Set(revealed),
+              peekedCardIndices: new Set(),
+              dealStage: "awaiting-card",
+              divineCheckedStages: new Set(),
+              divineRevealFeedback: new Map(),
+              divineActivations: 0,
+            });
+            updateChainLegReports();
+          }
+        }, animateInitialDeal ? 0 : null, playerOwnedSide(legPending), new Set(legState?.peekedCardIndices ?? []));
+        if (legPending.bet) scene.showWagerChips(legPending.bet.side, wagerChipsFor(legPending));
+        if (!completed) {
+          scene.setCardSelection(unrevealedDealtCardIndices(shownCount, revealed), (cardIndex) => selectCardForRevealForLeg(index, cardIndex));
+        }
+      } else {
+        tableScene = scene;
+      }
+    });
+  } else {
+    const host = document.querySelector<HTMLElement>("#table-3d-stage");
+    if (!host) return;
+    tableScene = new TableScene(host);
+  }
+  if (!tableScene) return;
   const sequence = dealSequence(pending);
+  const dealingCardCount = dealtCardCount;
+  const dealingRevealedCards = new Set(revealedCardIndices);
   const animateFromIndex = dealStage === "animating" ? 0 : dealStage === "drawing-card" ? dealtCardCount - 1 : null;
+  const dealingLegIndex = game.pendingChain?.currentLegIndex ?? null;
   tableScene.deal(sequence.slice(0, dealtCardCount), revealedCardIndices, () => {
+    if (game.pendingChain && dealingLegIndex !== null) {
+      chainLegUiStates.set(dealingLegIndex, {
+        dealtCardCount: dealingCardCount,
+        revealedCardIndices: new Set(dealingRevealedCards),
+        peekedCardIndices: new Set(peekedCardIndices),
+        dealStage: "awaiting-card",
+        divineCheckedStages: new Set(divineCheckedStages),
+        divineRevealFeedback: new Map(divineRevealFeedback),
+        divineActivations: divineActivationsThisRound,
+      });
+      if (activeChainLegIndex !== dealingLegIndex) return;
+    }
     if (pending.bet) {
       dealStage = "awaiting-card";
       render();
@@ -908,16 +1355,12 @@ function setupDealing(): void {
       dealStage = "dealer-revealing";
       render();
     }
-  }, animateFromIndex, playerOwnedSide(pending));
+  }, animateFromIndex, playerOwnedSide(pending), peekedCardIndices);
   if (dealStage === "awaiting-card" && pending.bet) {
     const selectable = unrevealedDealtCardIndices(dealtCardCount, revealedCardIndices);
-    tableScene.setCardSelection(selectable, selectCardForReveal);
+    tableScene.setCardSelection(selectable, dealingLegIndex === null ? selectCardForReveal : (selectedIndex) => selectCardForRevealForLeg(dealingLegIndex, selectedIndex));
   }
-  const denominations = chipDenominations(casino);
-  const recordedWagerTotal = roundWagerChips.reduce((sum, chip) => sum + chip.value, 0);
-  const wagerChips = pending.bet && recordedWagerTotal === pending.bet.amount
-    ? roundWagerChips
-    : composeChipAmount(pending.bet?.amount ?? 0, denominations);
+  const wagerChips = wagerChipsFor(pending);
   if (pending.bet && dealStage !== "settling-chips") {
     tableScene.showWagerChips(pending.bet.side, wagerChips);
   }
@@ -933,27 +1376,58 @@ function setupDealing(): void {
   if (dealStage === "settled" && divineSpecialPending && !roadCreationFailure) viewTimers.push(window.setTimeout(showDivineSpecialEvent, 320));
 }
 
-function selectCardForReveal(index: number): void {
+function selectCardForReveal(index: number, scene: TableScene | null = tableScene, legIndex: number | null = activeChainLegIndex): void {
+  if (armedCheatSkill) {
+    const target = cheatTargetForCard(armedCheatSkill, legIndex ?? 0, index);
+    if (target) {
+      const skill = armedCheatSkill;
+      armedCheatSkill = null;
+      updateCheatArmedState();
+      applyCheatSkillToTarget(skill, target);
+    }
+    return;
+  }
   const pending = game.pending;
-  if (!pending?.bet || dealStage !== "awaiting-card" || index >= dealtCardCount || revealedCardIndices.has(index) || !tableScene) return;
+  if (!pending?.bet || dealStage !== "awaiting-card" || index >= dealtCardCount || revealedCardIndices.has(index) || !scene) return;
   const entry = dealSequence(pending)[index];
   if (!entry) return;
   const ownedSide = playerOwnedSide(pending);
-  tableScene.focus(index, () => {
-    if (cardRevealActor(entry.side, ownedSide) === "self") beginSqueeze(index, armDivineAssist(index));
-    else revealFocusedCardByDealer(index);
-  });
+  const assist = armDivineAssist(index);
+  if (cardRevealActor(entry.side, ownedSide) === "self") {
+    scene.focus(index, () => beginSqueeze(index, assist, scene, legIndex));
+    return;
+  }
+  if (assist) {
+    scene.focus(index, () => beginDealerDivineReveal(index, assist.target, scene, legIndex));
+    return;
+  }
+  scene.revealFocusedByDealer(index, () => finishReveal(index, scene, legIndex), { keepFocus: true });
 }
 
-function finishReveal(index: number): void {
+function activateChainContext(legIndex: number | null): void {
+  if (legIndex === null || !game.pendingChain || game.pendingChain.currentLegIndex === legIndex) return;
+  selectChainLeg(legIndex);
+}
+
+function finishReveal(index: number, scene: TableScene | null = tableScene, legIndex: number | null = activeChainLegIndex): void {
+  if (!scene) return;
+  activateChainContext(legIndex);
   revealedCardIndices.add(index);
+  peekedCardIndices.delete(index);
   advanceAfterCurrentCards();
 }
 
-function finishRevealWhileFocused(index: number): void {
+function finishRevealWhileFocused(index: number, scene: TableScene | null = tableScene, legIndex: number | null = activeChainLegIndex): void {
+  if (!scene) return;
+  activateChainContext(legIndex);
   revealedCardIndices.add(index);
+  peekedCardIndices.delete(index);
   const feedback = divineRevealFeedback.get(index);
-  const returnToTable = () => tableScene?.returnToTable(advanceAfterCurrentCards);
+  const advanceForContext = () => {
+    activateChainContext(legIndex);
+    advanceAfterCurrentCards();
+  };
+  const returnToTable = () => scene.returnToTable(advanceForContext);
   if (!feedback) {
     returnToTable();
     return;
@@ -1012,7 +1486,8 @@ function armDivineAssist(index: number): ArmedDivineAssist | null {
   return { target: info.target };
 }
 
-function startDivineGame(index: number, target: Outcome): void {
+function startDivineGame(index: number, target: Outcome, scene: TableScene | null = tableScene, legIndex: number | null = activeChainLegIndex): void {
+  activateChainContext(legIndex);
   tablePlayerInteractionActive = true;
   const activation = document.createElement("div");
   activation.className = "divine-activation";
@@ -1023,11 +1498,11 @@ function startDivineGame(index: number, target: Outcome): void {
   window.setTimeout(() => {
     activation.remove();
     document.body.classList.remove("divine-activation-active");
-    chooseDivineCardType(index, target);
+    chooseDivineCardType(index, target, scene, legIndex);
   }, 1000);
 }
 
-function chooseDivineCardType(index: number, target: Outcome): void {
+function chooseDivineCardType(index: number, target: Outcome, scene: TableScene | null, legIndex: number | null): void {
   const overlay = document.createElement("div");
   overlay.className = "divine-choice-overlay";
   overlay.innerHTML = `<section><span>神助一阶段 · 锁定牌型</span><h2>这张牌，要什么？</h2><p>选定牌型后，以连点挤牌把它挤出来。</p><div>${DIVINE_CARD_TYPE_OPTIONS.map((choice) => `<button data-divine-type="${choice.type}"><b>${choice.label}</b><small>${choice.detail}</small></button>`).join("")}</div></section>`;
@@ -1035,32 +1510,34 @@ function chooseDivineCardType(index: number, target: Outcome): void {
   overlay.querySelectorAll<HTMLButtonElement>("[data-divine-type]").forEach((button) => button.addEventListener("click", () => {
     const type = button.dataset.divineType as DivineCardType;
     overlay.remove();
+    activateChainContext(legIndex);
     runDivineMash(index, type, "short", (hit) => {
       if (hit && game.pending!.result.outcome === target) {
         divineRevealFeedback.set(index, { hit: true, target, probability: .72 });
-        tableScene?.setCard(index, dealSequence(game.pending!)[index]!.card);
+        scene?.setCard(index, dealSequence(game.pending!)[index]!.card);
         tablePlayerInteractionActive = false;
-        tableScene?.quickSqueeze();
+        scene?.quickSqueeze();
         return;
       }
-      chooseDivineCall(index, target);
-    });
+      chooseDivineCall(index, target, scene, legIndex);
+    }, scene, legIndex);
   }));
 }
 
-function chooseDivineCall(index: number, target: Outcome): void {
+function chooseDivineCall(index: number, target: Outcome, scene: TableScene | null, legIndex: number | null): void {
   const overlay = document.createElement("div");
   overlay.className = "divine-choice-overlay";
   overlay.innerHTML = `<section><span>神助二阶段 · 定下点数</span><h2>吸，还是吹？</h2><p>再挤一次，把胜局锁住。</p><div><button data-divine-call="draw"><b>吸</b><small>向上补点</small></button><button data-divine-call="blow"><b>吹</b><small>压低点数</small></button></div></section>`;
   document.body.append(overlay);
   overlay.querySelectorAll<HTMLButtonElement>("[data-divine-call]").forEach((button) => button.addEventListener("click", () => {
     overlay.remove();
+    activateChainContext(legIndex);
     runDivineMash(index, button.dataset.divineCall as "draw" | "blow", "long", (hit) => {
       divineRevealFeedback.set(index, { hit, target, probability: .78 });
-      tableScene?.setCard(index, dealSequence(game.pending!)[index]!.card);
+      scene?.setCard(index, dealSequence(game.pending!)[index]!.card);
       tablePlayerInteractionActive = false;
-      tableScene?.quickSqueeze();
-    });
+      scene?.quickSqueeze();
+    }, scene, legIndex);
   }));
 }
 
@@ -1071,13 +1548,13 @@ interface DivineShoutRegion {
   bottom: number;
 }
 
-function randomDivineShoutPosition(fontSize: number): { x: number; y: number } {
+function randomDivineShoutPosition(fontSize: number, scene: TableScene | null = tableScene): { x: number; y: number } {
   const width = window.innerWidth;
   const height = window.innerHeight;
   const horizontalMargin = Math.max(width * 0.1, Math.min(fontSize * 1.35, width * 0.3));
   const verticalMargin = Math.max(height * 0.18, fontSize * 0.7);
   const safe = { left: horizontalMargin, top: verticalMargin, right: width - horizontalMargin, bottom: height - verticalMargin };
-  const card = tableScene?.activeCardScreenBounds() ?? { left: width * 0.38, top: height * 0.25, right: width * 0.62, bottom: height * 0.75 };
+  const card = scene?.activeCardScreenBounds() ?? { left: width * 0.38, top: height * 0.25, right: width * 0.62, bottom: height * 0.75 };
   const gapX = fontSize * 1.45;
   const gapY = fontSize * 0.75;
   const candidates: DivineShoutRegion[] = [
@@ -1101,7 +1578,7 @@ function randomDivineShoutPosition(fontSize: number): { x: number; y: number } {
   };
 }
 
-function runDivineMash(index: number, choice: DivineCardType | "draw" | "blow", edge: "short" | "long", done: (hit: boolean) => void): void {
+function runDivineMash(index: number, choice: DivineCardType | "draw" | "blow", edge: "short" | "long", done: (hit: boolean) => void, scene: TableScene | null = tableScene, legIndex: number | null = activeChainLegIndex): void {
   const prompt = document.createElement("div");
   prompt.className = "divine-mash-prompt";
   prompt.innerHTML = `<strong>狂按！</strong><span>点击任何位置开始挤牌</span>`;
@@ -1122,23 +1599,24 @@ function runDivineMash(index: number, choice: DivineCardType | "draw" | "blow", 
     const resolve = () => {
       if (finished) return;
       finished = true;
+      activateChainContext(legIndex);
       const entry = dealSequence(game.pending!)[index]!;
       const hit = choice === "draw" || choice === "blow"
         ? game.applyDivineCall(entry.side, entry.handIndex, choice)
         : game.applyDivineCardType(entry.side, entry.handIndex, choice);
       overlay.remove();
-      if (edge === "short") tableScene?.resetDivineMash();
+      if (edge === "short") scene?.resetDivineMash();
       done(hit);
     };
     overlay.addEventListener("click", () => {
       if (finished) return;
       progress = Math.min(completionProgress, progress + clickAdvance);
-      tableScene?.divineMashStep(edge, progress);
+      scene?.divineMashStep(edge, progress);
       const progressRatio = progress / completionProgress;
       const randomScale = 0.78 + Math.random() * 0.4;
       const maximumSize = Math.min(window.innerWidth * 0.24, window.innerHeight * 0.15);
       const fontSize = Math.max(34, Math.min((34 + progressRatio * 82) * randomScale, maximumSize));
-      const position = randomDivineShoutPosition(fontSize);
+      const position = randomDivineShoutPosition(fontSize, scene);
       const shout = document.createElement("span");
       shout.textContent = word;
       shout.style.setProperty("--x", `${position.x}px`);
@@ -1163,7 +1641,7 @@ function runDivineMash(index: number, choice: DivineCardType | "draw" | "blow", 
       const speed = completionProgress * divineMashRetreatRatioPerMs(progress / completionProgress);
       progress = Math.max(0, progress - (now - lastAt) * speed);
       lastAt = now;
-      tableScene?.divineMashStep(edge, progress);
+      scene?.divineMashStep(edge, progress);
       if (progress <= 0) resolve();
       else requestAnimationFrame(tick);
     };
@@ -1199,17 +1677,44 @@ function advanceAfterCurrentCards(): void {
   const currentCardsAreOpen = Array.from({ length: dealtCardCount }, (_, index) => index)
     .every((index) => revealedCardIndices.has(index));
   if (!currentCardsAreOpen) {
-    render();
+    if (tableScene && pending.bet && dealStage === "awaiting-card") {
+      tableScene.setCardSelection(unrevealedDealtCardIndices(dealtCardCount, revealedCardIndices), activeChainLegIndex === null ? selectCardForReveal : (index) => selectCardForRevealForLeg(activeChainLegIndex!, index));
+    }
+    updateChainLegReports();
     return;
   }
   const sequence = dealSequence(pending);
   if (dealtCardCount < sequence.length) {
+    const previousCount = dealtCardCount;
     dealtCardCount += 1;
     dealStage = "drawing-card";
+    if (tableScene) {
+      tableScene.deal(sequence.slice(0, dealtCardCount), revealedCardIndices, () => {
+        dealStage = "awaiting-card";
+        tableScene?.setCardSelection(unrevealedDealtCardIndices(dealtCardCount, revealedCardIndices), activeChainLegIndex === null ? selectCardForReveal : (index) => selectCardForRevealForLeg(activeChainLegIndex!, index));
+        updateChainLegReports();
+      }, previousCount, playerOwnedSide(pending));
+    }
+    updateChainLegReports();
+    return;
+  }
+  if (pendingLossCanBeChallenged(pending)) {
+    dealStage = "awaiting-cheat";
+    tablePlayerInteractionActive = false;
     render();
     return;
   }
   settleOnTable();
+}
+
+function pendingIsLoss(pending: PendingRound): boolean {
+  if (!pending.bet) return false;
+  if (pending.result.outcome === "tie" && pending.bet.side !== "tie") return false;
+  return pending.result.outcome !== pending.bet.side;
+}
+
+function pendingLossCanBeChallenged(pending: PendingRound): boolean {
+  return pendingIsLoss(pending) && game.availableChips > 0 && game.availableCheatSkills.length > 0;
 }
 
 function revealNextAutomatically(): void {
@@ -1220,58 +1725,66 @@ function revealNextAutomatically(): void {
     advanceAfterCurrentCards();
     return;
   }
-  tableScene.focus(index, () => revealFocusedCardByDealer(index));
-}
-
-function revealFocusedCardByDealer(index: number): void {
   const assist = armDivineAssist(index);
   if (assist) {
-    tableScene?.beginSqueeze(index, () => undefined, () => finishRevealWhileFocused(index));
-    startDivineGame(index, assist.target);
+    tableScene.focus(index, () => beginDealerDivineReveal(index, assist.target, tableScene!, activeChainLegIndex));
     return;
   }
-  tableScene?.revealFocusedByDealer(index, () => {
-    finishReveal(index);
-  });
+  tableScene.revealFocusedByDealer(index, () => finishReveal(index), { keepFocus: true });
 }
 
-function beginSqueeze(index: number, assist: ArmedDivineAssist | null): void {
+function beginDealerDivineReveal(index: number, target: Outcome, scene: TableScene, legIndex: number | null): void {
+  scene.beginSqueeze(index, () => undefined, () => finishRevealWhileFocused(index, scene, legIndex));
+  startDivineGame(index, target, scene, legIndex);
+}
+
+function beginSqueeze(index: number, assist: ArmedDivineAssist | null, scene: TableScene | null = tableScene, legIndex: number | null = activeChainLegIndex): void {
+  if (!scene) return;
+  activateChainContext(legIndex);
   if (assist) {
-    tableScene?.beginSqueeze(index, () => undefined, () => finishRevealWhileFocused(index));
-    startDivineGame(index, assist.target);
+    scene.beginSqueeze(index, () => undefined, () => finishRevealWhileFocused(index, scene, legIndex));
+    startDivineGame(index, assist.target, scene, legIndex);
     return;
   }
-  const tableStage = document.querySelector<HTMLElement>(".immersive-table-stage")!;
-  tableStage.classList.add("squeeze-active");
+  const interactionHost = scene.hostElement;
+  const tableStage = interactionHost.closest<HTMLElement>(".immersive-table-stage")!;
+  const squeezeClassHost = game.pendingChain ? interactionHost : tableStage;
+  squeezeClassHost.classList.add("squeeze-active");
   const overlay = document.createElement("div");
-  const forecast = currentCardForecast(game.pending!);
   overlay.className = "table-squeeze-ui";
-  overlay.innerHTML = `
-    <div class="squeeze-direction-hints" aria-hidden="true">
-      <i class="squeeze-direction-arrow long-edge"></i>
-      <i class="squeeze-direction-arrow corner"></i>
-      <i class="squeeze-direction-arrow short-edge"></i>
-    </div>
-    <div class="table-squeeze-controls ${forecast ? "has-forecast" : ""}">
-      ${forecast}
-      <button class="secondary" data-squeeze-quick>快速开牌</button>
-    </div>`;
-  tableStage.append(overlay);
-  tableScene!.beginSqueeze(index, (progress) => {
+  overlay.innerHTML = "";
+  interactionHost.append(overlay);
+  updateChainLegReports();
+  scene.beginSqueeze(index, (progress) => {
     overlay.classList.toggle("interacting", progress > 0.01);
     if (progress >= 1) overlay.classList.add("settling");
   }, () => {
-    tableStage.classList.remove("squeeze-active");
+    squeezeClassHost.classList.remove("squeeze-active");
     overlay.remove();
-    finishRevealWhileFocused(index);
+    finishRevealWhileFocused(index, scene, legIndex);
   });
-  overlay.querySelector<HTMLElement>("[data-squeeze-quick]")!.addEventListener("click", () => tableScene?.quickSqueeze());
 }
 
 function bind(): void {
   app.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => element.addEventListener("click", () => {
     const action = element.dataset.action;
     const navigationAction = Boolean(action && ["map", "restaurant", "skills", "casinos", "lobby"].includes(action));
+    if (view === "dealing" && action === "lobby" && (game.pending || game.pendingChain)) {
+      const confirmed = window.confirm("退出牌局将视为认输，当前下注筹码不会返还。确定退出并回到大厅吗？");
+      if (!confirmed) return;
+      game.abandonPendingRound();
+      resetBetDraft(false);
+      roundWagerChips = [];
+      lastRound = null;
+      lastSettlement = null;
+      lastChainSettlement = null;
+      inlineWatchActive = false;
+      tablePlayerInteractionActive = false;
+      armedCheatSkill = null;
+      view = "lobby";
+      render();
+      return;
+    }
     if (inlineWatchActive && !inlineWatchSettled && navigationAction) return;
     if (inlineWatchActive && inlineWatchSettled && navigationAction) resetInlineWatch();
     if (view === "table" && action && ["map", "restaurant", "skills", "casinos", "lobby"].includes(action)) resetBetDraft(true);
@@ -1296,7 +1809,8 @@ function bind(): void {
       view = "lobby";
     }
     if (action === "upgrade") game.upgradeRestaurant();
-    if (action === "pawn" && confirm(`典当后餐厅将停止产出。确认典当并获得 ${money(game.restaurantInfo().pawn)}？`)) game.pawnRestaurant();
+    if (action === "pawn" && confirm(`本次抵押将获得 ${game.restaurantInfo().pawnLotChips} 枚泥码。确认抵押？`)) game.pawnRestaurantForChips();
+    if (action === "redeem-pawn" && confirm(`需要支付 ${money(Math.ceil(game.restaurantInfo().pawnDebtCash * 2.5))} 赎回抵押额度。确认赎回？`)) game.redeemRestaurant();
     if (action === "close-restaurant") {
       game.closeRestaurant();
       restaurantClosingPromptOpen = false;
@@ -1356,11 +1870,17 @@ function bind(): void {
       roadMarkFeedback = null;
       game.notice = "已清除本桌全部路书标记";
     }
+    if (action === "cancel-cheat") {
+      armedCheatSkill = null;
+      game.notice = "已取消出千选择";
+      updateCheatArmedState();
+      restoreCardSelectionAfterCheatCancel();
+      return;
+    }
     if (action === "dismiss-road-creation-failure") roadCreationFailure = null;
     if (action === "cancel-bet") {
       game.cancelReservedBet();
-      stagedBetSide = null;
-      stagedBetChips = [];
+      resetBetDraft(false);
     }
     if (action === "watch") {
       resetBetDraft(true);
@@ -1374,14 +1894,54 @@ function bind(): void {
       lastSettlement = null;
       view = "table";
     }
-    if (action === "confirm-bet" && stagedBetSide && game.reservedBetAmount > 0) {
+    if (action === "confirm-bet" && (stagedBetSide || chainTargetSelected.some(Boolean))) {
+      const chainStakeTargets = chainTargets.filter((target, index): target is Outcome => chainTargetSelected[index] && (target === "banker" || target === "player" || target === "tie"));
+      if (!chainStakeTargets.length) return;
+      const stake = selectedChipCount * 100;
+      const reserved = chainStakeTargets.length > 1
+        ? game.reserveChainStake(stake, tableId)
+        : game.reserveChipBet(stake);
+      if (!reserved) {
+        render();
+        return;
+      }
+      lastChainSettlement = null;
       roadCreationFailure = null;
-      roundWagerChips = [...stagedBetChips];
-      game.play(tableId, { side: stagedBetSide, amount: game.reservedBetAmount });
-      resetBetDraft(false);
+      game.setRoadCreationSequence(tableId, chainStakeTargets.length > 1
+        ? chainStakeTargets.filter((target): target is Side => target === "banker" || target === "player")
+        : stagedBetSide === "banker" || stagedBetSide === "player" ? [stagedBetSide] : []);
+      roundWagerChips = Array.from({ length: selectedChipCount }, () => ({ value: 100, colorIndex: 0 }));
+      if (chainStakeTargets.length > 1) game.playChain(tableId, [...chainStakeTargets]);
+      else game.play(tableId, { side: stagedBetSide!, amount: game.reservedBetAmount });
+      chainLegUiStates.clear();
+      activeChainLegIndex = chainRounds > 1 ? 0 : null;
+      resetBetDraft(false, false);
       revealedCardIndices.clear(); divineCheckedStages.clear(); divineRevealFeedback.clear(); divineActivationsThisRound = 0; divineSpecialPending = false; tablePlayerInteractionActive = false; dealtCardCount = 4; dealStage = "animating"; view = "dealing";
     }
+    if (action === "give-up") {
+      if (game.pendingChain) {
+        game.abandonPendingRound();
+        resetBetDraft(false, false);
+        roundWagerChips = [];
+        chainLegUiStates.clear();
+        activeChainLegIndex = null;
+        revealedCardIndices.clear();
+        peekedCardIndices.clear();
+        lastRound = null;
+        lastSettlement = null;
+        lastChainSettlement = null;
+        armedCheatSkill = null;
+        dealStage = "animating";
+        view = "table";
+        game.notice = "已放弃本场连战，下注筹码不予返还";
+        render();
+      } else if (game.pending && dealStage === "awaiting-cheat") {
+        settleOnTable();
+      }
+      return;
+    }
     if (action === "dismiss-settlement") {
+      lastChainSettlement = null;
       if (inlineWatchActive) resetInlineWatch();
       else tablePlayerInteractionActive = false;
       dealStage = "animating";
@@ -1399,7 +1959,7 @@ function bind(): void {
 
   app.querySelectorAll<HTMLElement>("[data-casino]").forEach((element) => element.addEventListener("click", () => {
     const selectedCasinoId = element.dataset.casino!;
-    if (!game.enterCasino(selectedCasinoId)) {
+    if (!game.enterCasinoWithChips(selectedCasinoId)) {
       render();
       return;
     }
@@ -1412,7 +1972,8 @@ function bind(): void {
     roadMarkFeedback = null;
     tableId = element.dataset.table!;
     const casino = casinos.find((item) => item.id === casinoId)!;
-    selectedChip = casino.minBet;
+    selectedChipCount = Math.ceil(casino.minBet / 100);
+    chainTargetSelected = [false];
     view = "table";
     render();
   }));
@@ -1534,27 +2095,79 @@ function bind(): void {
     render();
   }));
 
-  app.querySelectorAll<HTMLElement>("[data-chip]").forEach((element) => element.addEventListener("click", () => {
-    selectedChip = Number(element.dataset.chip);
-    render();
+  app.querySelectorAll<HTMLInputElement>("[data-chip-count]").forEach((element) => element.addEventListener("input", () => {
+    selectedChipCount = Math.max(1, Math.floor(Number(element.value)));
+    const valueLabel = element.closest<HTMLElement>(".chip-count-slider")?.querySelector<HTMLElement>("[data-chip-count-value]");
+    if (valueLabel) valueLabel.textContent = `${selectedChipCount} 枚`;
+    app.querySelectorAll<HTMLElement>(".zone-wager strong").forEach((label) => { label.textContent = `${selectedChipCount} 枚`; });
+    const min = Number(element.min);
+    const max = Number(element.max);
+    const validTargets = chainTargetSelected.some(Boolean);
+    const canConfirm = selectedChipCount >= min && selectedChipCount <= max && game.availableChips >= selectedChipCount && validTargets;
+    const confirm = app.querySelector<HTMLButtonElement>("[data-bet-confirm]");
+    if (confirm) confirm.disabled = !canConfirm;
+  }));
+  bindCheatSkillActions();
+  app.querySelectorAll<HTMLElement>("[data-chain-leg-select]").forEach((element) => element.addEventListener("click", (event) => {
+    event.stopPropagation();
+    selectChainLeg(Number(element.dataset.chainLegSelect));
   }));
   app.querySelectorAll<HTMLElement>("[data-bet-zone]").forEach((element) => element.addEventListener("click", () => {
-    const side = element.dataset.betZone as Outcome;
     const casino = casinos.find((item) => item.id === casinoId)!;
-    if (stagedBetSide && stagedBetSide !== side) {
-      render();
-      return;
+    const side = element.dataset.betZone as Outcome;
+    const targetIndex = chainRounds > 1 ? Number(element.dataset.betZoneIndex) : 0;
+    if (chainRounds > 1 && Number.isInteger(targetIndex) && targetIndex >= 0 && targetIndex < chainRounds) {
+      const selectedCount = chainTargetSelected.filter(Boolean).length;
+      const isSameTarget = chainTargetSelected[targetIndex] && chainTargets[targetIndex] === side;
+      if (isSameTarget) {
+        // 只能从最后一局开始撤销，前面的目标保持不变。
+        if (targetIndex !== selectedCount - 1) return;
+        const remainingCount = selectedCount - 1;
+        if (remainingCount <= 0) {
+          chainTargets = ["banker"];
+          chainTargetSelected = [false];
+          chainRounds = 1;
+        } else {
+          chainRounds = Math.min(casino.maxChainRounds, remainingCount + 1);
+          chainTargets = chainTargets.slice(0, chainRounds);
+          while (chainTargets.length < chainRounds) chainTargets.push("banker");
+          chainTargetSelected = Array.from({ length: chainRounds }, (_, index) => index < remainingCount);
+        }
+      } else {
+        // 目标行可以改押另一侧；只有点击当前最后一个空白行时才会追加下一行。
+        chainTargets[targetIndex] = side;
+        chainTargetSelected[targetIndex] = true;
+        const nextSelectedCount = Math.max(selectedCount, targetIndex + 1);
+        chainRounds = Math.min(casino.maxChainRounds, nextSelectedCount + 1);
+        chainTargets = chainTargets.slice(0, chainRounds);
+        while (chainTargets.length < chainRounds) chainTargets.push("banker");
+        chainTargetSelected = Array.from({ length: chainRounds }, (_, index) => index < nextSelectedCount);
+        if (targetIndex >= nextSelectedCount) {
+          chainTargetSelected[targetIndex] = true;
+        }
+      }
+    } else {
+      if (chainTargetSelected[0] && chainTargets[0] === side) {
+        chainTargetSelected[0] = false;
+        game.setRoadCreationSequence(tableId, []);
+        stagedBetSide = null;
+        render();
+        return;
+      }
+      chainTargets[0] = side;
+      chainTargetSelected[0] = true;
+      if (casino.maxChainRounds > 1) {
+        chainRounds = 2;
+        chainTargets.push("banker");
+        chainTargetSelected.push(false);
+      }
     }
-    if (game.reservedBetAmount + selectedChip > casino.maxBet) {
-      render();
-      return;
-    }
-    if (!game.reserveBetChip(selectedChip)) {
-      render();
-      return;
-    }
-    stagedBetSide = side;
-    stagedBetChips.push({ value: selectedChip, colorIndex: chipDenominations(casino).indexOf(selectedChip) });
+    game.setRoadCreationSequence(tableId, chainTargets.filter((target, index): target is Side => {
+      const selected = chainRounds > 1 ? chainTargetSelected[index] : chainTargetSelected[0];
+      return selected && (target === "banker" || target === "player");
+    }));
+    const lastSelectedIndex = chainTargetSelected.reduce((last, selected, index) => selected ? index : last, -1);
+    stagedBetSide = lastSelectedIndex >= 0 ? chainTargets[lastSelectedIndex]! : null;
     render();
   }));
 
@@ -1580,7 +2193,7 @@ window.setInterval(() => {
   const insideCasino = activeActivity === "casino";
   const paused = worldTimePaused();
   const tick = game.tickRealtime(Date.now(), atTable ? tableId : null, insideCasino, paused, activeActivity === "restaurant");
-  if (tick.income > 0) game.notice = `餐厅到账 ${money(tick.income)}`;
+  if (tick.income > 0) game.notice = `餐厅产出 ${tick.income} 枚筹码`;
   if (tick.sleepDeprivationStarted) {
     sleepDeprivationNoticeOpen = true;
     render();
@@ -1599,6 +2212,8 @@ window.setInterval(() => {
 
   const wallet = document.querySelector<HTMLElement>(".wallet strong");
   if (wallet) wallet.textContent = money(game.cash);
+  const chipWallet = document.querySelector<HTMLElement>(".chip-wallet strong");
+  if (chipWallet) chipWallet.textContent = `${game.availableChips} 枚`;
 
   const worldClock = document.querySelector<HTMLElement>("[data-world-clock]");
   if (worldClock) worldClock.textContent = worldTimeLabel();

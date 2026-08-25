@@ -132,6 +132,7 @@ interface SceneCard {
   group: THREE.Group;
   back: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   face: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  peekMask: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   foldedFace: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   finger: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   tableTarget: THREE.Vector3;
@@ -165,11 +166,13 @@ export class TableScene {
   private onDealComplete: () => void = () => undefined;
   private focusTarget: { position: THREE.Vector3; lookAt: THREE.Vector3; done: () => void } | null = null;
   private cameraLookAt = new THREE.Vector3(0, 0, 0);
-  private homeCameraPosition = new THREE.Vector3(0, 7.4, 9.2);
+  private homeCameraPosition = new THREE.Vector3(0, 13.4, 0.04);
   private homeCameraLookAt = new THREE.Vector3(0, 0, 0);
   private squeezeIndex: number | null = null;
   private squeezeProgress = 0;
   private squeezeDragging = false;
+  private squeezePointerMoved = false;
+  private squeezeClickOnly = false;
   private squeezeCompleting = false;
   private squeezePaused = false;
   private squeezeThresholdTriggered = false;
@@ -224,9 +227,13 @@ export class TableScene {
     this.animate();
   }
 
-  deal(cards: TableCard[], revealed: Set<number>, onDone: () => void, animateFromIndex: number | null = null, ownedSide: Side | null = null): void {
+  get hostElement(): HTMLElement {
+    return this.host;
+  }
+
+  deal(cards: TableCard[], revealed: Set<number>, onDone: () => void, animateFromIndex: number | null = null, ownedSide: Side | null = null, peeked: Set<number> = new Set()): void {
     this.cards.forEach((entry) => this.scene.remove(entry.group));
-    this.cards = cards.map((entry, index) => this.createCard(entry, revealed.has(index), ownedSide));
+    this.cards = cards.map((entry, index) => this.createCard(entry, revealed.has(index), ownedSide, peeked.has(index)));
     this.dealStartIndex = animateFromIndex ?? cards.length;
     this.dealStartedAt = animateFromIndex === null ? 0 : performance.now();
     this.dealDone = animateFromIndex === null;
@@ -242,17 +249,17 @@ export class TableScene {
     const entry = this.cards[index];
     if (!entry) return;
     this.focusTarget = {
-      position: new THREE.Vector3(entry.target.x, 3.15, entry.target.z + 3.4),
+      position: new THREE.Vector3(entry.target.x, 7.9, entry.target.z + 0.04),
       lookAt: new THREE.Vector3(entry.target.x, 0, entry.target.z),
       done: onDone,
     };
   }
 
-  setCardSelection(indices: number[], onSelect: (index: number) => void): void {
+  setCardSelection(indices: number[], onSelect: (index: number) => void, allowRevealed = false): void {
     this.clearCardHover();
     this.selectableCardIndices = new Set(indices.filter((index) => {
       const entry = this.cards[index];
-      return Boolean(entry && !entry.revealed);
+      return Boolean(entry && (allowRevealed || !entry.revealed));
     }));
     this.onCardSelect = onSelect;
     this.renderer.domElement.style.cursor = this.selectableCardIndices.size ? "pointer" : "default";
@@ -281,7 +288,18 @@ export class TableScene {
     if (!entry) return;
     entry.back.visible = false;
     entry.face.visible = true;
+    entry.peekMask.visible = false;
     entry.revealed = true;
+  }
+
+  showPeeked(index: number): void {
+    const entry = this.cards[index];
+    if (!entry) return;
+    entry.back.visible = false;
+    entry.face.visible = true;
+    entry.peekMask.visible = true;
+    // 透牌只改变可见性，保留 revealed=false，后续仍可正常点击开牌。
+    entry.revealed = false;
   }
 
   setCard(index: number, card: Card): void {
@@ -302,6 +320,7 @@ export class TableScene {
     this.squeezePaused = false;
     this.squeezeThresholdTriggered = false;
     this.squeezeProgress = 0;
+    this.squeezeClickOnly = false;
     this.fingerRemovalProgress = 0;
     this.fingerIntentDistance = 0;
     this.fingerRemoving = false;
@@ -310,7 +329,11 @@ export class TableScene {
     this.onSqueezeComplete = onComplete;
     this.foldNormal.set(0, -1);
     this.foldOffset = this.foldSupport(this.foldNormal);
+    // 透牌只显示信息；真正开牌时先恢复盖牌状态，再开始咪牌。
+    entry.back.visible = true;
+    entry.back.material.opacity = 1;
     entry.face.visible = false;
+    entry.peekMask.visible = false;
     entry.foldedFace.visible = true;
     entry.finger.visible = false;
     entry.finger.geometry.setAttribute("position", new THREE.Float32BufferAttribute([], 3));
@@ -350,6 +373,7 @@ export class TableScene {
     this.squeezeProgress = 0;
     this.foldOffset = this.foldSupport(this.foldNormal);
     entry.face.visible = false;
+    entry.peekMask.visible = false;
     entry.foldedFace.visible = false;
     entry.finger.visible = false;
     entry.back.visible = true;
@@ -421,6 +445,12 @@ export class TableScene {
   revealFocusedByDealer(index: number, onDone: () => void, options: DealerRevealOptions = {}): void {
     const entry = this.cards[index];
     if (!entry) return;
+    // 被透视过的牌也必须从盖牌状态开始正常翻开。
+    entry.back.visible = true;
+    entry.back.material.opacity = 1;
+    entry.face.visible = false;
+    entry.peekMask.visible = false;
+    entry.face.material.opacity = 1;
     const threshold = options.threshold ?? 1;
     let progress = 0;
     let lastAt = performance.now();
@@ -570,7 +600,7 @@ export class TableScene {
     this.chipTransferStartedAt = 0;
   }
 
-  private createCard(entry: TableCard, revealed: boolean, ownedSide: Side | null): SceneCard {
+  private createCard(entry: TableCard, revealed: boolean, ownedSide: Side | null, peeked = false): SceneCard {
     const group = new THREE.Group();
     group.scale.setScalar(TABLE_CARD_SCALE);
     const positions = tableCardPositions(entry, ownedSide);
@@ -581,6 +611,7 @@ export class TableScene {
     const geometry = new THREE.PlaneGeometry(1.15, 1.7);
     const back = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: this.backTexture(), side: THREE.DoubleSide }));
     const face = new THREE.Mesh(geometry.clone(), new THREE.MeshBasicMaterial({ map: this.faceTexture(entry.card), side: THREE.DoubleSide, transparent: true }));
+    const peekMask = new THREE.Mesh(geometry.clone(), new THREE.MeshBasicMaterial({ color: 0x2b78a8, side: THREE.DoubleSide, transparent: true, opacity: 0.34, depthTest: false, depthWrite: false }));
     const foldedFace = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
       map: face.material.map,
       side: THREE.DoubleSide,
@@ -590,18 +621,21 @@ export class TableScene {
     }));
     const finger = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xc58f72, side: THREE.DoubleSide, transparent: true }));
     face.position.z = -0.004;
-    face.visible = revealed;
-    back.visible = !revealed;
+    peekMask.position.z = -0.012;
+    face.visible = revealed || peeked;
+    peekMask.visible = peeked && !revealed;
+    back.visible = !revealed && !peeked;
     foldedFace.visible = false;
     foldedFace.frustumCulled = false;
     finger.visible = false;
     foldedFace.position.z = 0.006;
     foldedFace.renderOrder = 3;
-    finger.renderOrder = 4;
-    group.add(back, face, foldedFace, finger);
+    peekMask.renderOrder = 4;
+    finger.renderOrder = 5;
+    group.add(back, face, peekMask, foldedFace, finger);
     this.scene.add(group);
     return {
-      group, back, face, foldedFace, finger, tableTarget, target, revealed,
+      group, back, face, peekMask, foldedFace, finger, tableTarget, target, revealed,
       side: entry.side,
       originalBackMap: back.material.map!,
       revealCanvas: null,
@@ -626,8 +660,17 @@ export class TableScene {
     if (!local) return;
     const entry = this.cards[this.squeezeIndex]!;
     const snapped = snapSqueezeDirection(local.x, local.y, "player");
-    if (!snapped) return;
     if (event.cancelable) event.preventDefault();
+    if (!snapped) {
+      this.squeezeClickOnly = true;
+      this.squeezePointerMoved = false;
+      this.squeezeLastPointer.set(local.x, local.y);
+      this.squeezeDragging = true;
+      this.renderer.domElement.style.cursor = "grabbing";
+      this.renderer.domElement.setPointerCapture(event.pointerId);
+      return;
+    }
+    this.squeezeClickOnly = false;
     this.squeezeAttempt += 1;
     this.foldNormal.set(snapped.normal.x, snapped.normal.y);
     this.fingerDirection.set(snapped.fingerDirection.x, snapped.fingerDirection.y);
@@ -641,6 +684,7 @@ export class TableScene {
     this.squeezeProgress = 0;
     this.updateSqueezeTexture();
     this.squeezeDragging = true;
+    this.squeezePointerMoved = false;
     this.renderer.domElement.style.cursor = "grabbing";
     this.renderer.domElement.setPointerCapture(event.pointerId);
   };
@@ -659,9 +703,17 @@ export class TableScene {
     if (!this.squeezeDragging) return;
     if (event.cancelable) event.preventDefault();
     const local = this.pointerOnCardPlane(event);
-    if (!local) return;
+    if (!local) {
+      if (this.squeezeClickOnly) this.squeezePointerMoved = true;
+      return;
+    }
     const pointer = new THREE.Vector2(local.x, local.y);
     const delta = pointer.clone().sub(this.squeezeLastPointer);
+    if (delta.lengthSq() > 0.0004) this.squeezePointerMoved = true;
+    if (this.squeezeClickOnly) {
+      this.squeezeLastPointer.copy(pointer);
+      return;
+    }
     this.squeezeLastPointer.copy(pointer);
     const removalDelta = delta.dot(this.fingerDirection);
     const inwardDelta = -delta.dot(this.foldNormal);
@@ -707,7 +759,13 @@ export class TableScene {
     if (event?.cancelable) event.preventDefault();
     this.squeezeDragging = false;
     this.renderer.domElement.style.cursor = "grab";
+    if (this.squeezeClickOnly) {
+      this.squeezeClickOnly = false;
+      if (!this.squeezePointerMoved) this.quickSqueeze();
+      return;
+    }
     if (this.foldAdvance() >= SQUEEZE_COMPLETE_PROGRESS) this.quickSqueeze();
+    else if (!this.squeezePointerMoved) this.quickSqueeze();
     else {
       const attempt = this.squeezeAttempt;
       const start = this.squeezeProgress;
@@ -969,6 +1027,7 @@ export class TableScene {
     const index = this.squeezeIndex;
     const entry = this.cards[index]!;
     entry.face.visible = true;
+    entry.peekMask.visible = false;
     entry.face.material.side = THREE.DoubleSide;
     this.renderer.domElement.style.cursor = "default";
     entry.face.material.transparent = true;
@@ -1097,7 +1156,7 @@ export class TableScene {
       : this.camera.aspect < 1
         ? THREE.MathUtils.clamp(1.75 / this.camera.aspect, 1.65, 2.6)
       : THREE.MathUtils.clamp(1.12 / this.camera.aspect, 1, 1.65);
-    this.homeCameraPosition.set(0, 7.4 * distanceScale, 9.2 * distanceScale);
+    this.homeCameraPosition.set(0, 13.4 * distanceScale, 0.04);
     this.homeCameraLookAt.set(0, 0, 0);
     if (!this.focusTarget && this.squeezeIndex === null) {
       this.camera.position.copy(this.homeCameraPosition);
