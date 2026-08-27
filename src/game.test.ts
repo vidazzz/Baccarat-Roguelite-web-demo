@@ -208,6 +208,93 @@ describe("chain wagering and chip economy", () => {
     expect(game.settle().chainCompleted).toBe(true);
   });
 
+  it("allows a settled chain leg to be changed without recording its history twice", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("set-edge")) game.grantTemporaryCheatSkill();
+    game.reserveChainStake(200, "harbor-1");
+    const chain = game.playChain("harbor-1", ["player", "player"]);
+    chain.legs[0]!.result.outcome = "player";
+    chain.legs[1]!.result.outcome = "banker";
+    const historyLengthBefore = game.table("harbor-1").history.length;
+
+    expect(game.settle().chainContinues).toBe(true);
+    game.selectChainLeg(1);
+    expect(game.settle().chainContinues).toBe(true);
+    expect(chain.legs.every((leg) => leg.settled)).toBe(true);
+    expect(game.table("harbor-1").history).toHaveLength(historyLengthBefore + 2);
+
+    expect(game.selectChainLeg(0)?.result).toBe(chain.legs[0]!.result);
+    expect(game.useSetEdge({ legIndex: 0, side: "player", handIndex: 0 }, "four-edge")).toBe(true);
+    expect(game.reconcileChainAfterCheat(0)?.chainContinues).toBe(true);
+    expect(game.table("harbor-1").history).toHaveLength(historyLengthBefore + 2);
+  });
+
+  it("keeps another active chain leg operable when a settled leg is recalculated", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("set-edge")) game.grantTemporaryCheatSkill();
+    game.reserveChainStake(200, "harbor-1");
+    const chain = game.playChain("harbor-1", ["banker", "player"]);
+    chain.legs[0]!.result.outcome = "banker";
+
+    expect(game.settle().chainContinues).toBe(true);
+    const activePending = game.selectChainLeg(1);
+    expect(activePending).not.toBeNull();
+    expect(game.useSetEdge({ legIndex: 0, side: "player", handIndex: 0 }, "three-edge")).toBe(true);
+    expect(game.reconcileChainAfterCheat(0)?.chainContinues).toBe(true);
+    expect(game.pending).toBe(activePending);
+    expect(game.pendingChain?.currentLegIndex).toBe(1);
+  });
+
+  it("pays out and closes an all-settled chain once a cheat makes every target win", () => {
+    const game = new Game();
+    game.reserveChainStake(200, "harbor-1");
+    const chain = game.playChain("harbor-1", ["banker", "player"]);
+    chain.legs[0]!.result.outcome = "banker";
+    chain.legs[1]!.result.outcome = "banker";
+    const historyLengthBefore = game.table("harbor-1").history.length;
+
+    expect(game.settle().chainContinues).toBe(true);
+    game.selectChainLeg(1);
+    expect(game.settle().chainContinues).toBe(true);
+    chain.legs[1]!.result.outcome = "player";
+
+    const reconciliation = game.reconcileChainAfterCheat(1);
+    expect(reconciliation).toMatchObject({ chainCompleted: true, delta: 800 });
+    expect(game.cash).toBe(8800);
+    expect(game.pendingChain).toBeNull();
+    expect(game.table("harbor-1").history).toHaveLength(historyLengthBefore + 2);
+  });
+
+  it("keeps a settled tie open while cheats remain and closes it when resources run out", () => {
+    const game = new Game();
+    game.reserveChainStake(100, "harbor-1");
+    const chain = game.playChain("harbor-1", ["banker"]);
+    chain.legs[0]!.result.outcome = "tie";
+
+    expect(game.settle().chainContinues).toBe(true);
+    expect(game.pendingChain).toBe(chain);
+    game.chips = 0;
+
+    const reconciliation = game.reconcileChainAfterCheat(0);
+    expect(reconciliation).toMatchObject({ chainCompleted: true, delta: 100 });
+    expect(game.pendingChain).toBeNull();
+  });
+
+  it("lets the UI finalize an all-settled chain when no legal cheat target remains", () => {
+    const game = new Game();
+    game.reserveChainStake(100, "harbor-1");
+    const chain = game.playChain("harbor-1", ["banker"]);
+    chain.legs[0]!.result.outcome = "player";
+
+    expect(game.settle().chainContinues).toBe(true);
+    expect(game.availableChips).toBeGreaterThan(0);
+    expect(game.availableCheatSkills.length).toBeGreaterThan(0);
+
+    expect(game.finalizeSettledChain()).toMatchObject({ chainCompleted: true, delta: 0 });
+    expect(game.pendingChain).toBeNull();
+    expect(game.cash).toBe(8000);
+  });
+
   it("projects confirmed bet targets into the shared road sequence", () => {
     const game = new Game();
     game.setRoadCreationSequence("harbor-1", ["banker", "player"]);
