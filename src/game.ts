@@ -37,6 +37,7 @@ export interface GameTable {
   dealerName: string;
   dealerRewardKind: "chips" | "cheat-skill";
   dealerRewardChips: number;
+  dealerRewardSkillId?: CheatSkillId;
   history: RoundResult[];
   historyOffset: number;
   round: number;
@@ -72,7 +73,7 @@ export interface PendingRound {
   confidencePrediction: Side | null;
   confidenceBreakdown: ConfidenceBreakdown;
   createdRoadPrediction: Side | null;
-  betCurrency?: "cash" | "chip";
+  betCurrency?: "chip";
 }
 
 export interface ChainLeg {
@@ -188,7 +189,6 @@ export function inlineWatchSteps(result: RoundResult): InlineWatchStep[] {
 export type SkillId = Exclude<PatternId, "none">;
 
 export type CheatSkillId = "peek-covered" | "swap-covered" | "set-edge" | "redraw-face-up" | "swap-face-up";
-const cheatEdgeTypes: DivineCardType[] = ["face", "no-edge", "two-edge", "three-edge", "four-edge"];
 
 export interface CheatSkillDefinition {
   id: CheatSkillId;
@@ -197,13 +197,20 @@ export interface CheatSkillDefinition {
   description: string;
 }
 
+export interface CoveredReorderCard {
+  legIndex: number;
+  side: Side;
+  handIndex: number;
+}
+
 export const cheatSkillDefinitions: readonly CheatSkillDefinition[] = [
-  { id: "peek-covered", name: "透牌", timing: "covered", description: "查看盖牌牌面，但牌仍保持盖牌状态。" },
-  { id: "swap-covered", name: "调牌", timing: "covered", description: "交换己方前两张盖牌的顺序。" },
-  { id: "set-edge", name: "定边", timing: "covered", description: "将盖牌重新抽为指定边数类型。" },
-  { id: "redraw-face-up", name: "重抽", timing: "face-up", description: "重新抽取当前明牌，并重新计算牌局结果。" },
-  { id: "swap-face-up", name: "换牌", timing: "face-up", description: "交换己方前两张明牌的顺序。" },
+  { id: "peek-covered", name: "透视盖牌", timing: "covered", description: "查看所有未结算牌局中已发出的盖牌，但不翻开。" },
+  { id: "swap-covered", name: "重排盖牌", timing: "covered", description: "拿起所有未结算牌局中的己方盖牌，可跨牌局按任意顺序重新排列。" },
+  { id: "set-edge", name: "指定边数", timing: "covered", description: "选择一张盖牌并指定公、没边、两边、三边或四边，再随机替换为该类牌。" },
+  { id: "redraw-face-up", name: "重抽明牌", timing: "face-up", description: "重新抽取一张已翻开的明牌，并重新计算牌局结果。" },
+  { id: "swap-face-up", name: "调换明牌", timing: "face-up", description: "从所有未结算牌局中选择两张己方明牌进行一次交换。" },
 ];
+export const CHEAT_SKILL_COST = 1;
 
 export interface SkillDefinition {
   id: SkillId;
@@ -225,11 +232,15 @@ export const RESTAURANT_CLOSING_MINUTE = 20 * 60;
 export const MINIMUM_NATURAL_WAKE_DEBT_WORLD_MINUTES = 60;
 export const SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES = 8 * 60;
 export const SLEEP_DEBT_THRESHOLD_WORLD_MINUTES = 10 * 60;
+// 睡眠不足的惩罚流程暂时关闭，睡眠债务仍会继续累计并可通过休息清除。
+export const SLEEP_DEPRIVATION_ENABLED = false;
 export const WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO = 60;
 export const WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO = 1;
 export const MAX_SKILL_LEVEL = 5;
 export const BASE_CONFIDENCE = 0;
 const MAX_TABLE_HISTORY = 240;
+export const TABLE_HISTORY_RESET_THRESHOLD = 100;
+export const TABLE_HISTORY_RESTART_ROUNDS = 10;
 const nextSleepDeprivationCheckAt = (worldMinute: number): number => {
   const dayStart = Math.floor(worldMinute / 1440) * 1440;
   const todayAtOpening = dayStart + RESTAURANT_OPENING_MINUTE;
@@ -261,7 +272,6 @@ const defaultDebugGameplayConfig = (): DebugGameplayConfig => ({
 export class Game {
   cash = 8000;
   chips = 10;
-  mudChips = 0;
   restaurant: Restaurant = { level: 1, cycleElapsedWorldMinutes: 0, pawned: false, open: true, closeAtWorldMinute: RESTAURANT_CLOSING_MINUTE, pawnDebtCash: 0 };
   worldMinutes = 18 * 60;
   skills: Record<PatternId, number> = { "long-banker": 2, "long-player": 1, "ping-pong": 1, none: 0 };
@@ -280,7 +290,6 @@ export class Game {
   notice = "先看路，再下注。";
   private rng: Rng = createRng(20260729);
   private lastRealtimeAt = Date.now();
-  private reservedWager = 0;
   private reservedChipWager = 0;
   private roadMarks = new Map<string, RoadMark>();
   private roadCreations = new Map<string, Side[]>();
@@ -295,7 +304,7 @@ export class Game {
     for (const casino of casinos) {
       for (let index = 0; index < casino.tableCount; index += 1) {
         const tableNumber = index + 1;
-        const table: GameTable = { id: `${casino.id}-${tableNumber}`, name: `${String(tableNumber).padStart(2, "0")} 号桌`, dealerName: dealerNames[(index + (casino.id === "grand" ? 2 : 0)) % dealerNames.length]!, dealerRewardKind: "chips", dealerRewardChips: 3, history: [], historyOffset: 0, round: 0, realtimeElapsedMs: index * 900, dealerCash: casino.dealerCash, dealerRewardClaimed: false };
+        const table: GameTable = { id: `${casino.id}-${tableNumber}`, name: `${String(tableNumber).padStart(2, "0")} 号桌`, dealerName: dealerNames[(index + (casino.id === "grand" ? 2 : 0)) % dealerNames.length]!, dealerRewardKind: "chips", dealerRewardChips: 3, dealerRewardSkillId: "peek-covered", history: [], historyOffset: 0, round: 0, realtimeElapsedMs: index * 900, dealerCash: casino.dealerCash, dealerRewardClaimed: false };
         this.refreshDealerReward(table, 1);
         for (let round = 0; round < 14 + index; round += 1) this.advanceTable(table);
         this.tables.set(table.id, table);
@@ -326,34 +335,31 @@ export class Game {
     return skill;
   }
 
-  useCheatSkill(skillId: CheatSkillId, side: Side, handIndex = 0, chainLegIndex: number | null = null): boolean {
-    if ((!this.pending && !this.pendingChain) || !this.dailyCheatSkills.includes(skillId) || !this.consumeChips(1)) return false;
+  useCheatSkill(skillId: CheatSkillId, side: Side, handIndex = 0, chainLegIndex: number | null = null, coveredOrder: number[] | null = null, coveredSlots: number[] | null = null): boolean {
+    if ((!this.pending && !this.pendingChain) || !this.dailyCheatSkills.includes(skillId)) return false;
+    if (skillId === "swap-covered") {
+      if (!coveredOrder || !coveredSlots) return false;
+      const legIndex = chainLegIndex ?? 0;
+      return this.useCoveredReorder(
+        coveredSlots.map((slot) => ({ legIndex, side, handIndex: slot })),
+        coveredOrder.map((slot) => ({ legIndex, side, handIndex: slot })),
+      );
+    }
+    // 调换明牌需要由交互层明确提交两个牌位，不能再沿用点击单张牌后交换同手前两张的旧规则。
+    if (skillId === "swap-face-up") return false;
+    // 指定边数需要先由交互层选择目标牌型，不能在这里随机决定牌型。
+    if (skillId === "set-edge") return false;
     const targetResult = this.pendingChain && chainLegIndex !== null
       ? this.pendingChain.legs[chainLegIndex]?.result
       : this.pending?.result;
     const targetLeg = this.pendingChain && chainLegIndex !== null
       ? this.pendingChain.legs[chainLegIndex]
       : null;
-    if (!targetResult || targetLeg?.settled) {
-      this.refundChips(1);
-      return false;
-    }
+    if (!targetResult || targetLeg?.settled || !this.consumeChips(CHEAT_SKILL_COST)) return false;
     const hand = side === "player" ? targetResult.playerCards : targetResult.bankerCards;
     if (!hand[handIndex]) {
       this.refundChips(1);
       return false;
-    }
-    if (skillId === "swap-covered" || skillId === "swap-face-up") {
-      if (hand.length < 2) {
-        this.refundChips(1);
-        return false;
-      }
-      [hand[0], hand[1]] = [hand[1]!, hand[0]!];
-      targetResult.playerPoints = handPoints(targetResult.playerCards);
-      targetResult.bankerPoints = handPoints(targetResult.bankerCards);
-      targetResult.outcome = targetResult.playerPoints === targetResult.bankerPoints
-        ? "tie"
-        : targetResult.bankerPoints > targetResult.playerPoints ? "banker" : "player";
     }
     if (skillId === "redraw-face-up") {
       const candidates = legalRoundCardCandidates(targetResult, side, handIndex);
@@ -364,20 +370,115 @@ export class Game {
       }
       Object.assign(targetResult, replacement);
     }
-    if (skillId === "set-edge") {
-      const desiredType = cheatEdgeTypes[Math.floor(this.rng.next() * cheatEdgeTypes.length)]!;
-      const candidates = legalRoundCardCandidates(targetResult, side, handIndex)
-        .filter((candidate) => {
-          const card = (side === "player" ? candidate.playerCards : candidate.bankerCards)[handIndex];
-          return card && divineCardTypeForRank(card.rank) === desiredType;
-        });
-      const replacement = candidates[Math.min(candidates.length - 1, Math.floor(this.rng.next() * candidates.length))];
-      if (!replacement) {
-        this.refundChips(1);
-          return false;
-        }
-      Object.assign(targetResult, replacement);
-    }
+    return true;
+  }
+
+  useSetEdge(target: CoveredReorderCard, desiredType: DivineCardType): boolean {
+    if ((!this.pending && !this.pendingChain) || !this.dailyCheatSkills.includes("set-edge")) return false;
+    if (!DIVINE_CARD_TYPE_OPTIONS.some((option) => option.type === desiredType)) return false;
+    if (!Number.isInteger(target.legIndex) || !Number.isInteger(target.handIndex) || target.handIndex < 0) return false;
+    if (target.side !== "player" && target.side !== "banker") return false;
+
+    const resolve = (): RoundResult | null => {
+      if (this.pendingChain) {
+        const leg = this.pendingChain.legs[target.legIndex];
+        return leg && !leg.settled ? leg.result : null;
+      }
+      return target.legIndex === 0 ? this.pending?.result ?? null : null;
+    };
+    const result = resolve();
+    if (!result) return false;
+    const hand = target.side === "player" ? result.playerCards : result.bankerCards;
+    if (!hand[target.handIndex]) return false;
+
+    // 指定边数是直接替换已发出的目标牌。不能用合法补牌候选集限制它，否则部分盖牌
+    // 会因替换后改变补牌条件而无法指定某些边数，违背“任意盖牌”的交互规则。
+    const replacementRanks = Array.from({ length: 13 }, (_, index) => index + 1)
+      .filter((rank) => divineCardTypeForRank(rank) === desiredType);
+    const replacementRank = replacementRanks[Math.min(replacementRanks.length - 1, Math.floor(this.rng.next() * replacementRanks.length))];
+    if (!replacementRank || !this.consumeChips(CHEAT_SKILL_COST)) return false;
+
+    hand[target.handIndex] = { ...hand[target.handIndex]!, rank: replacementRank };
+    result.playerPoints = handPoints(result.playerCards);
+    result.bankerPoints = handPoints(result.bankerCards);
+    result.outcome = result.bankerPoints === result.playerPoints
+      ? "tie"
+      : result.bankerPoints > result.playerPoints ? "banker" : "player";
+    result.natural = result.playerCards.length === 2
+      && result.bankerCards.length === 2
+      && (handPoints(result.playerCards) >= 8 || handPoints(result.bankerCards) >= 8);
+    return true;
+  }
+
+  useFaceUpSwap(first: CoveredReorderCard, second: CoveredReorderCard): boolean {
+    if ((!this.pending && !this.pendingChain) || !this.dailyCheatSkills.includes("swap-face-up")) return false;
+    const keyFor = ({ legIndex, side, handIndex }: CoveredReorderCard) => `${legIndex}:${side}:${handIndex}`;
+    if (keyFor(first) === keyFor(second)) return false;
+    const resolveOwned = (reference: CoveredReorderCard): { result: RoundResult; hand: RoundResult["playerCards"] } | null => {
+      if (!Number.isInteger(reference.legIndex) || !Number.isInteger(reference.handIndex) || reference.handIndex < 0) return null;
+      if (this.pendingChain) {
+        const leg = this.pendingChain.legs[reference.legIndex];
+        if (!leg || leg.settled || leg.target !== reference.side) return null;
+        const hand = reference.side === "player" ? leg.result.playerCards : leg.result.bankerCards;
+        return hand[reference.handIndex] ? { result: leg.result, hand } : null;
+      }
+      if (reference.legIndex !== 0 || !this.pending || this.pending.bet?.side !== reference.side) return null;
+      const hand = reference.side === "player" ? this.pending.result.playerCards : this.pending.result.bankerCards;
+      return hand[reference.handIndex] ? { result: this.pending.result, hand } : null;
+    };
+    const firstResolved = resolveOwned(first);
+    const secondResolved = resolveOwned(second);
+    if (!firstResolved || !secondResolved || !this.consumeChips(CHEAT_SKILL_COST)) return false;
+    [firstResolved.hand[first.handIndex], secondResolved.hand[second.handIndex]] = [
+      secondResolved.hand[second.handIndex]!,
+      firstResolved.hand[first.handIndex]!,
+    ];
+    new Set([firstResolved.result, secondResolved.result]).forEach((result) => {
+      result.playerPoints = handPoints(result.playerCards);
+      result.bankerPoints = handPoints(result.bankerCards);
+      result.outcome = result.playerPoints === result.bankerPoints
+        ? "tie"
+        : result.bankerPoints > result.playerPoints ? "banker" : "player";
+    });
+    return true;
+  }
+
+  useCoveredReorder(destinations: CoveredReorderCard[], sources: CoveredReorderCard[]): boolean {
+    if ((!this.pending && !this.pendingChain) || !this.dailyCheatSkills.includes("swap-covered")) return false;
+    if (destinations.length < 2 || destinations.length !== sources.length) return false;
+    const keyFor = ({ legIndex, side, handIndex }: CoveredReorderCard) => `${legIndex}:${side}:${handIndex}`;
+    const destinationKeys = destinations.map(keyFor);
+    const sourceKeys = sources.map(keyFor);
+    if (new Set(destinationKeys).size !== destinations.length || new Set(sourceKeys).size !== sources.length
+      || [...destinationKeys].sort().some((key, index) => key !== [...sourceKeys].sort()[index])) return false;
+    const resolve = (reference: CoveredReorderCard): { result: RoundResult; hand: RoundResult["playerCards"] } | null => {
+      if (!Number.isInteger(reference.legIndex) || !Number.isInteger(reference.handIndex) || reference.handIndex < 0) return null;
+      if (this.pendingChain) {
+        const leg = this.pendingChain.legs[reference.legIndex];
+        if (!leg || leg.settled) return null;
+        const hand = reference.side === "player" ? leg.result.playerCards : leg.result.bankerCards;
+        return hand[reference.handIndex] ? { result: leg.result, hand } : null;
+      }
+      if (reference.legIndex !== 0 || !this.pending) return null;
+      const hand = reference.side === "player" ? this.pending.result.playerCards : this.pending.result.bankerCards;
+      return hand[reference.handIndex] ? { result: this.pending.result, hand } : null;
+    };
+    const resolvedDestinations = destinations.map(resolve);
+    const resolvedSources = sources.map(resolve);
+    if (resolvedDestinations.some((entry) => !entry) || resolvedSources.some((entry) => !entry)) return false;
+    if (!this.consumeChips(CHEAT_SKILL_COST)) return false;
+
+    const originalCards = new Map(sourceKeys.map((key, index) => [key, resolvedSources[index]!.hand[sources[index]!.handIndex]!]));
+    destinations.forEach((destination, index) => {
+      resolvedDestinations[index]!.hand[destination.handIndex] = originalCards.get(sourceKeys[index])!;
+    });
+    new Set(resolvedDestinations.map((entry) => entry!.result)).forEach((result) => {
+      result.playerPoints = handPoints(result.playerCards);
+      result.bankerPoints = handPoints(result.bankerCards);
+      result.outcome = result.playerPoints === result.bankerPoints
+        ? "tie"
+        : result.bankerPoints > result.playerPoints ? "banker" : "player";
+    });
     return true;
   }
 
@@ -389,7 +490,9 @@ export class Game {
       this.chips += amount;
       return { kind: "chips", amount };
     }
-    return { kind: "cheat-skill", skillId: this.grantTemporaryCheatSkill() };
+    const skillId = table.dealerRewardSkillId ?? this.grantTemporaryCheatSkill();
+    if (!this.dailyCheatSkills.includes(skillId)) this.dailyCheatSkills.push(skillId);
+    return { kind: "cheat-skill", skillId };
   }
 
   table(id: string): GameTable {
@@ -399,11 +502,7 @@ export class Game {
   }
 
   enterCasino(casinoId: string): boolean {
-    const casino = casinos.find((item) => item.id === casinoId);
-    if (!casino || this.cash < casino.entryFee) return false;
-    this.cash -= casino.entryFee;
-    this.notice = `已支付 ${casino.name} 门票`;
-    return true;
+    return this.enterCasinoWithChips(casinoId);
   }
 
   enterCasinoWithChips(casinoId: string): boolean {
@@ -430,6 +529,8 @@ export class Game {
     const seed = [...table.id].reduce((total, character) => total + character.charCodeAt(0), day * 31);
     table.dealerRewardKind = seed % 2 === 0 ? "chips" : "cheat-skill";
     table.dealerRewardChips = 3 + ((seed * 13) % 8);
+    const skillIndex = Math.abs(seed * 17) % cheatSkillDefinitions.length;
+    table.dealerRewardSkillId = cheatSkillDefinitions[skillIndex]!.id;
   }
 
   previewProbability(tableId: string): ProbabilityInfo {
@@ -437,7 +538,7 @@ export class Game {
   }
 
   get reservedBetAmount(): number {
-    return this.reservedWager || this.reservedChipWager;
+    return this.reservedChipWager;
   }
 
   get reservedChainStake(): number {
@@ -445,14 +546,12 @@ export class Game {
   }
 
   get availableChips(): number {
-    return this.chips + this.mudChips;
+    return this.chips;
   }
 
   private consumeChips(count: number): boolean {
     if (!Number.isInteger(count) || count < 0 || this.availableChips < count) return false;
-    const mudUsed = Math.min(this.mudChips, count);
-    this.mudChips -= mudUsed;
-    this.chips -= count - mudUsed;
+    this.chips -= count;
     return true;
   }
 
@@ -463,7 +562,7 @@ export class Game {
   reserveChainStake(amount: number, tableId: string): boolean {
     const table = this.table(tableId);
     const casino = casinos.find((item) => table.id.startsWith(`${item.id}-`));
-    if (!casino || this.pending || this.pendingChain || this.reservedWager > 0 || this.reservedChipWager > 0) return false;
+    if (!casino || this.pending || this.pendingChain || this.reservedChipWager > 0) return false;
     if (!Number.isInteger(amount) || amount < casino.minBet || amount > casino.maxBet || amount % 100 !== 0) return false;
     const chipCount = amount / 100;
     if (!this.consumeChips(chipCount)) return false;
@@ -472,7 +571,7 @@ export class Game {
   }
 
   reserveChipBet(amount: number): boolean {
-    if (this.pending || this.pendingChain || this.reservedWager > 0 || this.reservedChipWager > 0) return false;
+    if (this.pending || this.pendingChain || this.reservedChipWager > 0) return false;
     if (!Number.isInteger(amount) || amount <= 0 || amount % 100 !== 0) return false;
     const chipCount = amount / 100;
     if (!this.consumeChips(chipCount)) return false;
@@ -496,24 +595,22 @@ export class Game {
   }
 
   reserveBetChip(amount: number): boolean {
-    if (this.pending || !Number.isFinite(amount) || amount <= 0 || amount > this.cash) return false;
-    this.cash -= amount;
-    this.reservedWager += amount;
+    if (this.pending || this.pendingChain || !Number.isFinite(amount) || amount <= 0 || amount % 100 !== 0) return false;
+    const chipCount = amount / 100;
+    if (!this.consumeChips(chipCount)) return false;
+    this.reservedChipWager += amount;
     return true;
   }
 
   cancelReservedBet(): number {
-    if (this.pending || (this.reservedWager <= 0 && this.reservedChipWager <= 0)) return 0;
+    if (this.pending || this.reservedChipWager <= 0) return 0;
     if (this.reservedChipWager > 0) {
       const refund = this.reservedChipWager;
       this.refundChips(refund / 100);
       this.reservedChipWager = 0;
       return refund;
     }
-    const refund = this.reservedWager;
-    this.reservedWager = 0;
-    this.cash += refund;
-    return refund;
+    return 0;
   }
 
   playChain(tableId: string, targets: Outcome[]): PendingChain {
@@ -638,7 +735,6 @@ export class Game {
   abandonPendingRound(): void {
     this.pending = null;
     this.pendingChain = null;
-    this.reservedWager = 0;
     this.reservedChipWager = 0;
   }
 
@@ -646,20 +742,16 @@ export class Game {
     if (this.pending || this.pendingChain) throw new Error("A round is already pending");
     const table = this.table(tableId);
     const chipBet = this.reservedChipWager > 0;
-    const liquidAssetsBeforeBet = this.cash + this.reservedWager;
+    const liquidAssetsBeforeBet = this.cash;
     if (bet) {
       if (!Number.isFinite(bet.amount) || bet.amount <= 0) throw new Error("下注金额无效");
       if (chipBet) {
         if (bet.amount !== this.reservedChipWager) throw new Error("确认金额与暂存筹码不一致");
         this.reservedChipWager = 0;
-      } else if (this.reservedWager > 0) {
-        if (bet.amount !== this.reservedWager) throw new Error("确认金额与暂存筹码不一致");
-        this.reservedWager = 0;
       } else {
-        if (bet.amount > this.cash) throw new Error("现金不足");
-        this.cash -= bet.amount;
+        if (!Number.isInteger(bet.amount) || bet.amount % 100 !== 0 || !this.consumeChips(bet.amount / 100)) throw new Error("筹码不足");
       }
-    } else if (this.reservedWager > 0 || this.reservedChipWager > 0) {
+    } else if (this.reservedChipWager > 0) {
       throw new Error("旁观前需取消暂存筹码");
     }
     const generated = generateInfluencedRound(this.rng, table.round + 1, table.history, { "long-banker": 0, "long-player": 0, "ping-pong": 0, none: 0 });
@@ -676,7 +768,7 @@ export class Game {
       confidencePrediction: prediction,
       confidenceBreakdown: breakdown,
       createdRoadPrediction: this.roadCreation(tableId),
-      betCurrency: bet ? (chipBet ? "chip" : "cash") : undefined,
+      betCurrency: bet ? "chip" : undefined,
     };
     return this.pending;
   }
@@ -966,11 +1058,7 @@ export class Game {
       this.chips += delta;
       return this.availableChips;
     }
-    let remaining = Math.min(this.availableChips, Math.abs(delta));
-    const regular = Math.min(this.chips, remaining);
-    this.chips -= regular;
-    remaining -= regular;
-    this.mudChips = Math.max(0, this.mudChips - remaining);
+    this.chips = Math.max(0, this.chips - Math.min(this.chips, Math.abs(delta)));
     return this.availableChips;
   }
 
@@ -1014,7 +1102,9 @@ export class Game {
   }
 
   private refreshSleepDeprivationSchedule(): void {
-    if (this.sleepDebtWorldMinutes >= this.debugGameplay.sleepDebtThresholdWorldMinutes) {
+    if (!SLEEP_DEPRIVATION_ENABLED) {
+      this.sleepDeprivationCollapseAtWorldMinute = null;
+    } else if (this.sleepDebtWorldMinutes >= this.debugGameplay.sleepDebtThresholdWorldMinutes) {
       this.sleepDeprivationCollapseAtWorldMinute ??= nextSleepDeprivationCheckAt(this.worldMinutes);
     } else {
       this.sleepDeprivationCollapseAtWorldMinute = null;
@@ -1070,7 +1160,7 @@ export class Game {
       else payout = bet.amount;
       delta = 0;
     } else if (bet && result.outcome === bet.side) {
-      payout = bet.side === "tie" ? bet.amount * 9 : bet.side === "banker" ? Math.floor(bet.amount * 1.95) : bet.amount * 2;
+      payout = bet.side === "tie" ? bet.amount * 9 : bet.amount * 2;
       delta = betCurrency === "chip" ? payout : payout - bet.amount;
     }
     this.cash += payout;
@@ -1112,18 +1202,18 @@ export class Game {
     const requestedWorldMinutes = worldTimePaused ? 0 : elapsed / 1000 * worldMinutesPerRealSecond;
     const sleepDebtThreshold = this.debugGameplay.sleepDebtThresholdWorldMinutes;
     const sleepDebtPerMidnight = this.debugGameplay.sleepDebtPerMidnightWorldMinutes;
-    const wasSleepDeprived = this.sleepDebtWorldMinutes >= sleepDebtThreshold;
+    const wasSleepDeprived = SLEEP_DEPRIVATION_ENABLED && this.sleepDebtWorldMinutes >= sleepDebtThreshold;
     const closeInMinutes = this.restaurant.open ? this.restaurant.closeAtWorldMinute - this.worldMinutes : Number.POSITIVE_INFINITY;
     const crossesRestaurantClose = requestedWorldMinutes > 0 && closeInMinutes >= 0 && closeInMinutes <= requestedWorldMinutes;
     const restaurantPromptInMinutes = pauseAtRestaurantClose && crossesRestaurantClose ? closeInMinutes : Number.POSITIVE_INFINITY;
-    const sleepDebtThresholdInMinutes = this.sleepDebtWorldMinutes >= sleepDebtThreshold || sleepDebtPerMidnight <= 0
+    const sleepDebtThresholdInMinutes = !SLEEP_DEPRIVATION_ENABLED || this.sleepDebtWorldMinutes >= sleepDebtThreshold || sleepDebtPerMidnight <= 0
       ? Number.POSITIVE_INFINITY
       : this.nextSleepDebtAtWorldMinute - this.worldMinutes + Math.max(0, Math.ceil((sleepDebtThreshold - this.sleepDebtWorldMinutes) / sleepDebtPerMidnight) - 1) * 1440;
     const reachesSleepDebtThreshold = requestedWorldMinutes > 0
       && sleepDebtThresholdInMinutes >= 0
       && sleepDebtThresholdInMinutes <= Math.min(requestedWorldMinutes, restaurantPromptInMinutes);
     const sleepDeprivationNoticeInMinutes = reachesSleepDebtThreshold ? sleepDebtThresholdInMinutes : Number.POSITIVE_INFINITY;
-    if (reachesSleepDebtThreshold) {
+    if (SLEEP_DEPRIVATION_ENABLED && reachesSleepDebtThreshold) {
       const thresholdAt = this.worldMinutes + sleepDebtThresholdInMinutes;
       this.sleepDeprivationCollapseAtWorldMinute = nextSleepDeprivationCheckAt(thresholdAt);
     }
@@ -1148,7 +1238,7 @@ export class Game {
       this.resetDealerFunds();
       for (let day = 0; day < crossedMidnights; day += 1) this.rollDailyCheatSkills();
     }
-    const sleepDeprivationStarted = reachesSleepDebtThreshold || (!wasSleepDeprived && this.sleepDebtWorldMinutes >= sleepDebtThreshold);
+    const sleepDeprivationStarted = SLEEP_DEPRIVATION_ENABLED && (reachesSleepDebtThreshold || (!wasSleepDeprived && this.sleepDebtWorldMinutes >= sleepDebtThreshold));
     let income = 0;
     let tablesAdvanced = 0;
     const advancedTableIds: string[] = [];
@@ -1173,6 +1263,7 @@ export class Game {
       while (table.realtimeElapsedMs >= LOBBY_ROUND_MS) {
         table.realtimeElapsedMs -= LOBBY_ROUND_MS;
         this.advanceTable(table);
+        if (table.id !== pausedTableId && table.history.length >= TABLE_HISTORY_RESET_THRESHOLD) this.restartTableHistory(table);
         tablesAdvanced += 1;
         if (!advancedTableIds.includes(table.id)) advancedTableIds.push(table.id);
       }
@@ -1256,7 +1347,7 @@ export class Game {
     this.lastSleepDurationWorldMinutes = wakeAt - restStartedAt;
     this.sleepDebtWorldMinutes = remainingDebt;
     this.nextSleepDebtAtWorldMinute = Math.floor(wakeAt / 1440) * 1440 + 1440;
-    this.sleepDeprivationCollapseAtWorldMinute = remainingDebt >= this.debugGameplay.sleepDebtThresholdWorldMinutes
+    this.sleepDeprivationCollapseAtWorldMinute = SLEEP_DEPRIVATION_ENABLED && remainingDebt >= this.debugGameplay.sleepDebtThresholdWorldMinutes
       ? nextSleepDeprivationCheckAt(wakeAt)
       : null;
     this.lastRealtimeAt = Date.now();
@@ -1264,7 +1355,7 @@ export class Game {
   }
 
   isSleepDeprived(): boolean {
-    return this.sleepDebtWorldMinutes >= this.debugGameplay.sleepDebtThresholdWorldMinutes;
+    return SLEEP_DEPRIVATION_ENABLED && this.sleepDebtWorldMinutes >= this.debugGameplay.sleepDebtThresholdWorldMinutes;
   }
 
   recoverFromSleepDeprivation(): { day: number; hour: number; minute: number } {
@@ -1307,7 +1398,7 @@ export class Game {
     if (lotCash <= 0) return 0;
     const chips = Math.floor(lotCash / 100);
     this.restaurant.pawnDebtCash += lotCash;
-    this.mudChips += chips;
+    this.chips += chips;
     if (this.restaurantChipInfo().pawnCapacityCash < 100) {
       this.restaurant.pawned = true;
       this.closeRestaurant();
@@ -1351,6 +1442,17 @@ export class Game {
     table.history.push(result);
     table.round += 1;
     this.trimTableHistory(table);
+  }
+
+  private restartTableHistory(table: GameTable): void {
+    this.clearRoadPlanning(table.id);
+    table.history = [];
+    table.historyOffset = 0;
+    for (let index = 0; index < TABLE_HISTORY_RESTART_ROUNDS; index += 1) {
+      const { result } = generateInfluencedRound(this.rng, table.round + 1, table.history, { "long-banker": 0, "long-player": 0, "ping-pong": 0, none: 0 });
+      table.history.push(result);
+      table.round += 1;
+    }
   }
 
   private trimTableHistory(table: GameTable): void {

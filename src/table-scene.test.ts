@@ -63,20 +63,20 @@ describe("squeeze direction snapping", () => {
     });
   });
 
-  it("places initial cards on mirrored player and banker table positions", () => {
-    const player = tableCardPositions({ side: "player", handIndex: 0 }, null);
-    const banker = tableCardPositions({ side: "banker", handIndex: 0 }, null);
-    expect(player.table.x).toBe(-banker.table.x);
-    expect(player.table.z).toBe(banker.table.z);
+  it("places the wager-owned hand near the player and the opponent across the table", () => {
+    const player = tableCardPositions({ side: "player", handIndex: 0 }, "player");
+    const banker = tableCardPositions({ side: "banker", handIndex: 0 }, "player");
+    expect(player.table.x).toBe(banker.table.x);
+    expect(player.table.z).toBeGreaterThan(banker.table.z);
     expect(player.resting).toEqual(player.table);
     expect(banker.resting).toEqual(banker.table);
   });
 
-  it("pushes only the wager-owned hand toward the player", () => {
+  it("uses the banker hand as the near hand when the player wagers banker", () => {
     const owned = tableCardPositions({ side: "banker", handIndex: 1 }, "banker");
     const dealer = tableCardPositions({ side: "player", handIndex: 1 }, "banker");
-    expect(owned.resting.z).toBeGreaterThan(owned.table.z);
-    expect(owned.resting.x).toBeCloseTo(1.5);
+    expect(owned.table.z).toBeGreaterThan(dealer.table.z);
+    expect(owned.resting).toEqual(owned.table);
     expect(dealer.resting).toEqual(dealer.table);
   });
 
@@ -85,8 +85,9 @@ describe("squeeze direction snapping", () => {
     const banker = settlementChipPositions("banker");
     const tie = settlementChipPositions("tie");
     expect(player.dealer).toEqual(banker.dealer);
-    expect(player.wager.x).toBe(-banker.wager.x);
-    expect(tie.wager.x).toBe(0);
+    expect(player.wager.x).toBeLessThan(0);
+    expect(banker.wager.x).toBe(player.wager.x);
+    expect(tie.wager.x).toBe(player.wager.x);
     expect(player.wager.z).toBeGreaterThan(player.dealer.z);
     expect(player.returned.z).toBeGreaterThan(player.wager.z);
   });

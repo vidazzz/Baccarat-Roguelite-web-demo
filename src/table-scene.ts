@@ -2,7 +2,9 @@ import * as THREE from "three";
 import { cardFaceAsset } from "./card-assets";
 import { type Card, type Outcome, type Side } from "./domain";
 
-const TABLE_CARD_SCALE = 1.75;
+// 牌桌底板已经铺满视野，牌张也要保持与示意图一致的视觉占比。
+const TABLE_CARD_SCALE = 2.85;
+const FOCUS_CAMERA_HEIGHT = 14.5;
 
 export interface TableCard {
   card: Card;
@@ -40,11 +42,13 @@ export interface SettlementChipPositions {
 }
 
 export function settlementChipPositions(side: Outcome): SettlementChipPositions {
-  const wagerX = side === "player" ? -5.7 : side === "banker" ? 5.7 : 0;
+  // 3D 牌桌统一使用左侧筹码区，避免庄闲押注切换时筹码横跨桌面。
+  const wagerX = -4.55;
+  const wagerZ = side === "tie" ? 2.55 : 2.75;
   return {
-    dealer: { x: 0, y: 0.08, z: -3.18 },
-    wager: { x: wagerX, y: 0.08, z: 2.95 },
-    returned: { x: wagerX, y: 0.08, z: 3.72 },
+    dealer: { x: -4.55, y: 0.08, z: -2.25 },
+    wager: { x: wagerX, y: 0.08, z: wagerZ },
+    returned: { x: wagerX, y: 0.08, z: wagerZ + 0.72 },
   };
 }
 
@@ -66,16 +70,12 @@ export function composeChipAmount(amount: number, denominations: number[]): Tabl
 }
 
 export function tableCardPositions(entry: Pick<TableCard, "side" | "handIndex">, ownedSide: Side | null): TableCardPositions {
-  const handOffsets = [-1.5, 1.5, 3.9];
-  const handOffset = handOffsets[entry.handIndex] ?? 3.9 + (entry.handIndex - 2) * 2.6;
-  const pushedOffsets = [-1.5, 1.5, 4.1];
-  const pushedX = pushedOffsets[entry.handIndex] ?? 4.1 + (entry.handIndex - 2) * 2.6;
-  const sideCenter = entry.side === "player" ? -4.45 : 4.45;
-  const tableX = sideCenter + (entry.side === "player" ? handOffset : -handOffset);
-  const table = { x: tableX, y: 0.025, z: -0.72 };
-  const resting = ownedSide === entry.side
-    ? { x: pushedX, y: 0.028, z: 2.9 }
-    : table;
+  const handOffsets = [-1.86, 1.86, 4.2];
+  const handOffset = handOffsets[entry.handIndex] ?? 4.2 + (entry.handIndex - 2) * 2.5;
+  const nearSide = ownedSide ?? "player";
+  const isNear = entry.side === nearSide;
+  const table = { x: handOffset, y: 0.025, z: isNear ? 4.15 : -4.15 };
+  const resting = table;
   return { table, resting };
 }
 
@@ -130,6 +130,7 @@ export interface DealerRevealOptions {
 
 interface SceneCard {
   group: THREE.Group;
+  selectionGlow: THREE.LineSegments;
   back: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   face: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   peekMask: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
@@ -151,22 +152,36 @@ interface ChipMotion {
   delay: number;
 }
 
+interface CoveredReorderState {
+  indices: Set<number>;
+  targets: Map<number, THREE.Vector3>;
+  externalRenderer: boolean;
+  allowLocalSwap: boolean;
+  interactionEnabled: boolean;
+  dragIndex: number | null;
+  hoverIndex: number | null;
+  onSwap: (fromIndex: number, toIndex: number) => void;
+  onDragStart: ((fromIndex: number, clientX: number, clientY: number) => void) | null;
+  onDrag: ((fromIndex: number, clientX: number, clientY: number) => void) | null;
+  onDrop: ((fromIndex: number, clientX: number, clientY: number) => boolean) | null;
+}
+
 export class TableScene {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
-  private camera = new THREE.PerspectiveCamera(37, 1, 0.1, 100);
+  private camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
   private cards: SceneCard[] = [];
+  private cardAreaMeshes = new Map<Side, THREE.Mesh>();
+  private cardLabelMeshes = new Map<Side, THREE.Mesh>();
   private textures: THREE.Texture[] = [];
   private disposed = false;
   private dealStartedAt = 0;
   private dealStartIndex = 0;
   private dealDone = false;
-  private pushStartedAt = 0;
-  private pushStartPositions: THREE.Vector3[] = [];
   private onDealComplete: () => void = () => undefined;
   private focusTarget: { position: THREE.Vector3; lookAt: THREE.Vector3; done: () => void } | null = null;
   private cameraLookAt = new THREE.Vector3(0, 0, 0);
-  private homeCameraPosition = new THREE.Vector3(0, 13.4, 0.04);
+  private homeCameraPosition = new THREE.Vector3(0, 10.6, 0.04);
   private homeCameraLookAt = new THREE.Vector3(0, 0, 0);
   private squeezeIndex: number | null = null;
   private squeezeProgress = 0;
@@ -197,6 +212,7 @@ export class TableScene {
   private selectableCardIndices = new Set<number>();
   private hoveredCardIndex: number | null = null;
   private onCardSelect: (index: number) => void = () => undefined;
+  private coveredReorder: CoveredReorderState | null = null;
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
@@ -207,6 +223,7 @@ export class TableScene {
     this.renderer.domElement.addEventListener("pointermove", this.pointerMove);
     this.renderer.domElement.addEventListener("pointerup", this.pointerUp);
     this.renderer.domElement.addEventListener("pointercancel", this.pointerUp);
+    this.renderer.domElement.addEventListener("pointerleave", this.pointerLeave);
     this.camera.position.copy(this.homeCameraPosition);
     this.cameraLookAt.copy(this.homeCameraLookAt);
 
@@ -215,13 +232,17 @@ export class TableScene {
     light.position.set(-4, 7, 5);
     light.castShadow = true;
     this.scene.add(light);
-    const felt = new THREE.Mesh(new THREE.PlaneGeometry(16, 11), new THREE.MeshStandardMaterial({ color: 0x124534, roughness: 0.92 }));
+    // 底板覆盖整个相机可视范围，避免牌桌四周出现大块未着色留白。
+    const felt = new THREE.Mesh(new THREE.PlaneGeometry(18, 18), new THREE.MeshStandardMaterial({ color: 0x124534, roughness: 0.92 }));
     felt.rotation.x = -Math.PI / 2;
     felt.receiveShadow = true;
     this.scene.add(felt);
-    this.addCardArea("PLAYER", 0x77c5ed, -4.45);
-    this.addCardArea("BANKER", 0xef9b87, 4.45);
-    this.addCardShoe();
+    this.addCardArea("PLAYER", 0x77c5ed, -4.15, "far");
+    this.addCardArea("BANKER", 0xef9b87, 4.15, "near");
+    this.addCenterDivider();
+    this.addCenterLabel("PLAYER", 0x77c5ed, -0.82);
+    this.addCenterLabel("BANKER", 0xef9b87, 0.82);
+    this.setCardAreaLayout(null);
     window.addEventListener("resize", this.resize);
     this.resize();
     this.animate();
@@ -232,13 +253,15 @@ export class TableScene {
   }
 
   deal(cards: TableCard[], revealed: Set<number>, onDone: () => void, animateFromIndex: number | null = null, ownedSide: Side | null = null, peeked: Set<number> = new Set()): void {
-    this.cards.forEach((entry) => this.scene.remove(entry.group));
+    this.setCardAreaLayout(ownedSide);
+    this.cards.forEach((entry) => {
+      this.scene.remove(entry.group);
+      this.disposeObject3D(entry.group);
+    });
     this.cards = cards.map((entry, index) => this.createCard(entry, revealed.has(index), ownedSide, peeked.has(index)));
     this.dealStartIndex = animateFromIndex ?? cards.length;
     this.dealStartedAt = animateFromIndex === null ? 0 : performance.now();
     this.dealDone = animateFromIndex === null;
-    this.pushStartedAt = 0;
-    this.pushStartPositions = [];
     this.onDealComplete = onDone;
     this.cards.forEach((entry, index) => {
       if (animateFromIndex === null || index < animateFromIndex) entry.group.position.copy(entry.target);
@@ -249,7 +272,8 @@ export class TableScene {
     const entry = this.cards[index];
     if (!entry) return;
     this.focusTarget = {
-      position: new THREE.Vector3(entry.target.x, 7.9, entry.target.z + 0.04),
+      // 聚焦时保留完整牌面和周边空间，避免镜头推进到牌张内部。
+      position: new THREE.Vector3(entry.target.x, FOCUS_CAMERA_HEIGHT, entry.target.z + 0.04),
       lookAt: new THREE.Vector3(entry.target.x, 0, entry.target.z),
       done: onDone,
     };
@@ -263,6 +287,95 @@ export class TableScene {
     }));
     this.onCardSelect = onSelect;
     this.renderer.domElement.style.cursor = this.selectableCardIndices.size ? "pointer" : "default";
+  }
+
+  beginCoveredReorder(
+    indices: number[],
+    onSwap: (fromIndex: number, toIndex: number) => void,
+    options: {
+      onDragStart?: (fromIndex: number, clientX: number, clientY: number) => void;
+      onDrag?: (fromIndex: number, clientX: number, clientY: number) => void;
+      onDrop?: (fromIndex: number, clientX: number, clientY: number) => boolean;
+      externalRenderer?: boolean;
+      allowLocalSwap?: boolean;
+      cardState?: "covered" | "revealed";
+    } = {},
+  ): boolean {
+    const requiredRevealedState = options.cardState === "revealed";
+    const validIndices = [...new Set(indices.filter((index) => this.cards[index]?.revealed === requiredRevealedState))];
+    if (!validIndices.length) return false;
+    this.clearCardHover();
+    this.selectableCardIndices.clear();
+    this.coveredReorder = {
+      indices: new Set(validIndices),
+      targets: new Map(validIndices.map((index) => [index, this.cards[index]!.target.clone()])),
+      externalRenderer: Boolean(options.externalRenderer),
+      allowLocalSwap: options.allowLocalSwap ?? true,
+      interactionEnabled: true,
+      dragIndex: null,
+      hoverIndex: null,
+      onSwap,
+      onDragStart: options.onDragStart ?? null,
+      onDrag: options.onDrag ?? null,
+      onDrop: options.onDrop ?? null,
+    };
+    validIndices.forEach((index) => {
+      const card = this.cards[index]!;
+      card.selectionGlow.visible = true;
+      card.group.scale.setScalar(TABLE_CARD_SCALE * 1.05);
+      card.group.visible = !this.coveredReorder!.externalRenderer;
+    });
+    this.renderer.domElement.style.cursor = "grab";
+    return true;
+  }
+
+  setCoveredReorderInteractionEnabled(enabled: boolean): void {
+    if (!this.coveredReorder) return;
+    this.coveredReorder.interactionEnabled = enabled;
+    if (!enabled) this.setReorderHover(null);
+    this.renderer.domElement.style.cursor = enabled ? "grab" : "default";
+  }
+
+  endCoveredReorder(): void {
+    const reorder = this.coveredReorder;
+    if (!reorder) return;
+    reorder.indices.forEach((index) => {
+      const card = this.cards[index];
+      if (!card) return;
+      card.group.visible = true;
+      card.selectionGlow.visible = false;
+      card.group.scale.setScalar(TABLE_CARD_SCALE);
+      card.group.position.copy(card.target);
+    });
+    this.coveredReorder = null;
+    this.renderer.domElement.style.cursor = "default";
+  }
+
+  coveredReorderCardAtClientPoint(clientX: number, clientY: number): number | null {
+    const exactHit = this.reorderCardAtClientPoint(clientX, clientY);
+    return exactHit ?? this.nearestReorderCardAtClientPoint(clientX, clientY);
+  }
+
+  coveredReorderCardScreenBounds(index: number): { left: number; top: number; right: number; bottom: number } | null {
+    if (!this.coveredReorder?.indices.has(index)) return null;
+    return this.cardScreenBounds(index);
+  }
+
+  coveredReorderCardModel(index: number): THREE.Group | null {
+    if (!this.coveredReorder?.indices.has(index)) return null;
+    const card = this.cards[index];
+    if (!card) return null;
+    const model = card.group.clone(true);
+    model.visible = true;
+    // 全局拖拽层只呈现牌张本体，不复制牌局内的选中描边。
+    model.traverse((object) => {
+      if (object instanceof THREE.LineSegments) object.visible = false;
+    });
+    return model;
+  }
+
+  setCoveredReorderHover(index: number | null): void {
+    this.setReorderHover(index);
   }
 
   activeCardScreenBounds(): { left: number; top: number; right: number; bottom: number } | null {
@@ -507,10 +620,27 @@ export class TableScene {
     this.renderer.domElement.removeEventListener("pointermove", this.pointerMove);
     this.renderer.domElement.removeEventListener("pointerup", this.pointerUp);
     this.renderer.domElement.removeEventListener("pointercancel", this.pointerUp);
+    this.renderer.domElement.removeEventListener("pointerleave", this.pointerLeave);
     this.clearSettlementChips();
+    this.scene.traverse((object) => this.disposeObject3D(object, false));
     this.textures.forEach((texture) => texture.dispose());
     this.renderer.dispose();
     this.host.replaceChildren();
+  }
+
+  private disposeObject3D(object: THREE.Object3D, removeFromScene = true): void {
+    if (removeFromScene) this.scene.remove(object);
+    object.traverse((child) => {
+      const renderable = child as THREE.Mesh | THREE.Line | THREE.Points;
+      if ("geometry" in renderable && renderable.geometry) renderable.geometry.dispose();
+      if (!("material" in renderable) || !renderable.material) return;
+      const materials = Array.isArray(renderable.material) ? renderable.material : [renderable.material];
+      materials.forEach((material) => {
+        const map = (material as THREE.Material & { map?: THREE.Texture | null }).map;
+        map?.dispose();
+        material.dispose();
+      });
+    });
   }
 
   private createChipPile(position: THREE.Vector3, chips: TableChip[]): THREE.Group {
@@ -620,6 +750,10 @@ export class TableScene {
       depthWrite: false,
     }));
     const finger = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xc58f72, side: THREE.DoubleSide, transparent: true }));
+    const selectionGlow = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geometry),
+      new THREE.LineBasicMaterial({ color: 0xffd36b, transparent: true, opacity: 0.95, depthTest: false }),
+    );
     face.position.z = -0.004;
     peekMask.position.z = -0.012;
     face.visible = revealed || peeked;
@@ -628,14 +762,17 @@ export class TableScene {
     foldedFace.visible = false;
     foldedFace.frustumCulled = false;
     finger.visible = false;
+    selectionGlow.visible = false;
+    selectionGlow.position.z = 0.02;
     foldedFace.position.z = 0.006;
     foldedFace.renderOrder = 3;
     peekMask.renderOrder = 4;
     finger.renderOrder = 5;
-    group.add(back, face, peekMask, foldedFace, finger);
+    selectionGlow.renderOrder = 7;
+    group.add(back, face, peekMask, foldedFace, finger, selectionGlow);
     this.scene.add(group);
     return {
-      group, back, face, peekMask, foldedFace, finger, tableTarget, target, revealed,
+      group, selectionGlow, back, face, peekMask, foldedFace, finger, tableTarget, target, revealed,
       side: entry.side,
       originalBackMap: back.material.map!,
       revealCanvas: null,
@@ -644,6 +781,20 @@ export class TableScene {
   }
 
   private pointerDown = (event: PointerEvent) => {
+    if (this.coveredReorder) {
+      if (!this.coveredReorder.interactionEnabled) return;
+      const index = this.coveredReorderCardAtClientPoint(event.clientX, event.clientY);
+      if (index === null) return;
+      if (event.cancelable) event.preventDefault();
+      this.coveredReorder.dragIndex = index;
+      this.coveredReorder.hoverIndex = null;
+      // 拖动牌张由页面全局图层接管，避免被当前牌局 canvas 裁剪或留下重复牌影。
+      this.cards[index]!.group.visible = false;
+      this.renderer.domElement.style.cursor = "grabbing";
+      this.renderer.domElement.setPointerCapture(event.pointerId);
+      this.coveredReorder.onDragStart?.(index, event.clientX, event.clientY);
+      return;
+    }
     if (this.squeezeIndex === null) {
       const index = this.selectableCardAtPointer(event);
       if (index === null) return;
@@ -690,12 +841,34 @@ export class TableScene {
   };
 
   private pointerMove = (event: PointerEvent) => {
+    if (this.coveredReorder) {
+      const reorder = this.coveredReorder;
+      if (!reorder.interactionEnabled) {
+        this.renderer.domElement.style.cursor = "default";
+        return;
+      }
+      if (reorder.dragIndex === null) {
+        const hovered = this.coveredReorderCardAtClientPoint(event.clientX, event.clientY);
+        this.setReorderHover(hovered);
+        this.renderer.domElement.style.cursor = hovered === null ? "default" : "grab";
+        return;
+      }
+      if (event.cancelable) event.preventDefault();
+      if (reorder.allowLocalSwap) {
+        this.setReorderHover(this.reorderCardAtPointer(event, reorder.dragIndex) ?? this.nearestReorderCardAtClientPoint(event.clientX, event.clientY, reorder.dragIndex));
+      }
+      reorder.onDrag?.(reorder.dragIndex, event.clientX, event.clientY);
+      return;
+    }
     if (this.squeezeIndex === null) {
       const hovered = this.selectableCardAtPointer(event);
       if (hovered !== this.hoveredCardIndex) {
         this.clearCardHover();
         this.hoveredCardIndex = hovered;
-        if (hovered !== null) this.cards[hovered]!.group.scale.setScalar(TABLE_CARD_SCALE * 1.04);
+        if (hovered !== null) {
+          this.cards[hovered]!.group.scale.setScalar(TABLE_CARD_SCALE * 1.04);
+          this.cards[hovered]!.selectionGlow.visible = true;
+        }
       }
       this.renderer.domElement.style.cursor = hovered === null ? "default" : "pointer";
       return;
@@ -755,6 +928,33 @@ export class TableScene {
   };
 
   private pointerUp = (event?: PointerEvent) => {
+    if (this.coveredReorder) {
+      const reorder = this.coveredReorder;
+      const fromIndex = reorder.dragIndex;
+      const toIndex = reorder.allowLocalSwap && event && fromIndex !== null
+        ? this.reorderCardAtPointer(event, fromIndex) ?? this.nearestReorderCardAtClientPoint(event.clientX, event.clientY, fromIndex)
+        : null;
+      const handledByAnotherScene = event && fromIndex !== null
+        ? reorder.onDrop?.(fromIndex, event.clientX, event.clientY) ?? false
+        : false;
+      if (event?.cancelable) event.preventDefault();
+      if (event && this.renderer.domElement.hasPointerCapture(event.pointerId)) this.renderer.domElement.releasePointerCapture(event.pointerId);
+      reorder.dragIndex = null;
+      if (fromIndex !== null) this.cards[fromIndex]!.group.visible = !reorder.externalRenderer;
+      this.setReorderHover(null);
+      if (!handledByAnotherScene && fromIndex !== null && toIndex !== null && fromIndex !== toIndex) {
+        const fromTarget = reorder.targets.get(fromIndex)?.clone();
+        const toTarget = reorder.targets.get(toIndex)?.clone();
+        if (fromTarget && toTarget) {
+          reorder.targets.set(fromIndex, toTarget);
+          reorder.targets.set(toIndex, fromTarget);
+          reorder.onSwap(fromIndex, toIndex);
+        }
+      }
+      reorder.onDrag?.(-1, 0, 0);
+      this.renderer.domElement.style.cursor = reorder.interactionEnabled ? "grab" : "default";
+      return;
+    }
     if (!this.squeezeDragging) return;
     if (event?.cancelable) event.preventDefault();
     this.squeezeDragging = false;
@@ -806,6 +1006,16 @@ export class TableScene {
     this.onSqueezeThreshold?.();
   }
 
+  private pointerLeave = () => {
+    if (this.coveredReorder) {
+      if (this.coveredReorder.dragIndex === null) this.setReorderHover(null);
+      return;
+    }
+    if (this.squeezeIndex !== null) return;
+    this.clearCardHover();
+    this.renderer.domElement.style.cursor = "default";
+  };
+
   private pointerOnCardPlane(event: PointerEvent): THREE.Vector3 | null {
     if (this.squeezeIndex === null) return null;
     const bounds = this.renderer.domElement.getBoundingClientRect();
@@ -818,6 +1028,24 @@ export class TableScene {
     const worldPoint = entry.group.localToWorld(new THREE.Vector3(0, 0, 0));
     const intersection = raycaster.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(worldNormal, worldPoint), new THREE.Vector3());
     return intersection ? entry.group.worldToLocal(intersection) : null;
+  }
+
+  private cardScreenBounds(index: number): { left: number; top: number; right: number; bottom: number } | null {
+    const entry = this.cards[index];
+    if (!entry) return null;
+    const bounds = this.renderer.domElement.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return null;
+    entry.group.updateWorldMatrix(true, false);
+    this.camera.updateMatrixWorld();
+    const points = [
+      new THREE.Vector3(-0.575, -0.85, 0),
+      new THREE.Vector3(0.575, -0.85, 0),
+      new THREE.Vector3(0.575, 0.85, 0),
+      new THREE.Vector3(-0.575, 0.85, 0),
+    ].map((point) => entry.group.localToWorld(point).project(this.camera));
+    const xs = points.map((point) => bounds.left + (point.x + 1) * bounds.width / 2);
+    const ys = points.map((point) => bounds.top + (1 - point.y) * bounds.height / 2);
+    return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
   }
 
   private selectableCardAtPointer(event: PointerEvent): number | null {
@@ -843,8 +1071,83 @@ export class TableScene {
     }) ?? null;
   }
 
+  private reorderCardAtPointer(event: PointerEvent, excludedIndex: number | null = null): number | null {
+    return this.reorderCardAtClientPoint(event.clientX, event.clientY, excludedIndex);
+  }
+
+  private reorderCardAtClientPoint(clientX: number, clientY: number, excludedIndex: number | null = null): number | null {
+    const reorder = this.coveredReorder;
+    if (!reorder) return null;
+    const bounds = this.renderer.domElement.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return null;
+    const pointer = new THREE.Vector2(
+      (clientX - bounds.left) / bounds.width * 2 - 1,
+      -((clientY - bounds.top) / bounds.height) * 2 + 1,
+    );
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(pointer, this.camera);
+    this.scene.updateMatrixWorld(true);
+    const indices = [...reorder.indices].filter((index) => index !== excludedIndex);
+    const meshes = indices.flatMap((index) => {
+      const entry = this.cards[index];
+      return entry ? [entry.back, entry.face] : [];
+    });
+    const hit = raycaster.intersectObjects(meshes, false)[0]?.object;
+    if (!hit) return null;
+    return indices.find((index) => {
+      const entry = this.cards[index];
+      return entry?.back === hit || entry?.face === hit;
+    }) ?? null;
+  }
+
+  private nearestReorderCardAtClientPoint(clientX: number, clientY: number, excludedIndex: number | null = null): number | null {
+    const reorder = this.coveredReorder;
+    if (!reorder) return null;
+    const bounds = this.renderer.domElement.getBoundingClientRect();
+    if (clientX < bounds.left || clientX > bounds.right || clientY < bounds.top || clientY > bounds.bottom) return null;
+    this.scene.updateMatrixWorld(true);
+    this.camera.updateMatrixWorld();
+    const pointer = new THREE.Vector2(clientX, clientY);
+    let closestIndex: number | null = null;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    reorder.indices.forEach((index) => {
+      if (index === excludedIndex) return;
+      const entry = this.cards[index];
+      if (!entry) return;
+      const position = entry.group.getWorldPosition(new THREE.Vector3()).project(this.camera);
+      const screenPosition = new THREE.Vector2(
+        bounds.left + (position.x + 1) * bounds.width / 2,
+        bounds.top + (1 - position.y) * bounds.height / 2,
+      );
+      const distance = pointer.distanceTo(screenPosition);
+      if (distance < closestDistance) {
+        closestIndex = index;
+        closestDistance = distance;
+      }
+    });
+    const snapRadius = Math.min(96, bounds.width * 0.18, bounds.height * 0.26);
+    return closestDistance <= snapRadius ? closestIndex : null;
+  }
+
+  private setReorderHover(index: number | null): void {
+    const reorder = this.coveredReorder;
+    if (!reorder || reorder.hoverIndex === index) return;
+    if (reorder.hoverIndex !== null) {
+      const previous = this.cards[reorder.hoverIndex];
+      if (previous) previous.group.scale.setScalar(TABLE_CARD_SCALE * 1.05);
+    }
+    reorder.hoverIndex = index;
+    if (index !== null) this.cards[index]?.group.scale.setScalar(TABLE_CARD_SCALE * 1.14);
+  }
+
   private clearCardHover(): void {
-    if (this.hoveredCardIndex !== null) this.cards[this.hoveredCardIndex]?.group.scale.setScalar(TABLE_CARD_SCALE);
+    if (this.hoveredCardIndex !== null) {
+      const card = this.cards[this.hoveredCardIndex];
+      if (card) {
+        card.group.scale.setScalar(TABLE_CARD_SCALE);
+        card.selectionGlow.visible = false;
+      }
+    }
     this.hoveredCardIndex = null;
   }
 
@@ -1063,42 +1366,65 @@ export class TableScene {
     requestAnimationFrame(settleFace);
   };
 
-  private addCardArea(label: string, color: number, x: number): void {
+  private addCardArea(label: string, _color: number, z: number, _depth: "near" | "far"): void {
     const canvas = document.createElement("canvas");
     canvas.width = 1260;
     canvas.height = 920;
     const ctx = canvas.getContext("2d")!;
     ctx.strokeStyle = "rgba(238,228,193,.58)";
     ctx.lineWidth = 6;
-    ctx.strokeRect(100, 200, 460, 680);
-    ctx.strokeRect(700, 200, 460, 680);
-    ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
-    ctx.font = "700 54px Arial, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText(label, 630, 120);
+    ctx.strokeRect(0, 110, 600, 700);
+    ctx.strokeRect(660, 110, 600, 700);
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     this.textures.push(texture);
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(6.1, 4.6), new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }));
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(7.1, 6.5), new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }));
     mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(x, 0.014, -0.92);
+    mesh.position.set(0, 0.014, z);
     this.scene.add(mesh);
+    this.cardAreaMeshes.set(label === "PLAYER" ? "player" : "banker", mesh);
   }
 
-  private addCardShoe(): void {
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(1.35, 0.38, 1.65),
-      new THREE.MeshStandardMaterial({ color: 0x171b18, roughness: 0.72, metalness: 0.08 }),
+  private setCardAreaLayout(ownedSide: Side | null): void {
+    const nearSide = ownedSide ?? "player";
+    this.cardAreaMeshes.get(nearSide)?.position.set(0, 0.014, 4.15);
+    this.cardAreaMeshes.get(nearSide === "player" ? "banker" : "player")?.position.set(0, 0.014, -4.15);
+    this.cardLabelMeshes.get(nearSide)?.position.set(0, 0.024, 0.82);
+    this.cardLabelMeshes.get(nearSide === "player" ? "banker" : "player")?.position.set(0, 0.024, -0.82);
+  }
+
+  private addCenterDivider(): void {
+    const divider = new THREE.Mesh(
+      new THREE.BoxGeometry(7.8, 0.018, 0.035),
+      new THREE.MeshBasicMaterial({ color: 0xd8ad59, transparent: true, opacity: 0.5 }),
     );
-    body.position.set(0, 0.2, -4.18);
-    body.castShadow = true;
-    this.scene.add(body);
-    const mouth = new THREE.Mesh(
-      new THREE.BoxGeometry(0.92, 0.12, 0.36),
-      new THREE.MeshStandardMaterial({ color: 0x7d2228, roughness: 0.62 }),
+    divider.position.set(0, 0.02, 0);
+    this.scene.add(divider);
+  }
+
+  private addCenterLabel(label: string, color: number, z: number): void {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1200;
+    canvas.height = 180;
+    const ctx = canvas.getContext("2d")!;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
+    ctx.globalAlpha = 0.82;
+    ctx.font = "900 116px Arial, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, canvas.width / 2, canvas.height / 2 + 4);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    this.textures.push(texture);
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(5.8, 0.88),
+      new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }),
     );
-    mouth.position.set(0, 0.16, -3.3);
-    this.scene.add(mouth);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(0, 0.024, z);
+    this.scene.add(mesh);
+    this.cardLabelMeshes.set(label === "PLAYER" ? "player" : "banker", mesh);
   }
 
   private faceTexture(card: Card): THREE.CanvasTexture {
@@ -1150,13 +1476,12 @@ export class TableScene {
     const width = this.host.clientWidth || 900;
     const height = this.host.clientHeight || 620;
     this.camera.aspect = width / height;
-    const narrowScreen = width <= 580;
-    const distanceScale = narrowScreen
-      ? THREE.MathUtils.clamp(2.1 / Math.min(this.camera.aspect, 1), 2.1, 2.7)
-      : this.camera.aspect < 1
-        ? THREE.MathUtils.clamp(1.75 / this.camera.aspect, 1.65, 2.6)
-      : THREE.MathUtils.clamp(1.12 / this.camera.aspect, 1, 1.65);
-    this.homeCameraPosition.set(0, 13.4 * distanceScale, 0.04);
+    // 根据上下牌位和牌张包围盒计算相机距离，让牌张在自适应视口中贴近上下边缘且不裁切。
+    const cardHalfDepth = 0.85 * TABLE_CARD_SCALE;
+    const requiredHalfDepth = 4.15 + cardHalfDepth;
+    const fitMargin = this.camera.aspect > 1.5 ? 1.12 : 1.04;
+    const cameraHeight = requiredHalfDepth / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * fitMargin;
+    this.homeCameraPosition.set(0, cameraHeight, 0.04);
     this.homeCameraLookAt.set(0, 0, 0);
     if (!this.focusTarget && this.squeezeIndex === null) {
       this.camera.position.copy(this.homeCameraPosition);
@@ -1175,29 +1500,10 @@ export class TableScene {
         if (index < this.dealStartIndex) return;
         const progress = THREE.MathUtils.clamp((elapsed - (index - this.dealStartIndex) * 220) / 480, 0, 1);
         const eased = 1 - (1 - progress) * (1 - progress);
-        entry.group.position.lerpVectors(new THREE.Vector3(0, 0.05, -3.75), entry.tableTarget, eased);
+        entry.group.position.lerpVectors(new THREE.Vector3(0, 0.05, -5.4), entry.tableTarget, eased);
       });
       if (!this.dealDone && elapsed >= (this.cards.length - this.dealStartIndex) * 220 + 500) {
         this.dealStartedAt = 0;
-        this.pushStartPositions = this.cards.map((entry) => entry.group.position.clone());
-        const needsPush = this.cards.some((entry) => entry.group.position.distanceTo(entry.target) > 0.01);
-        if (needsPush) this.pushStartedAt = now + 220;
-        else {
-          this.dealDone = true;
-          this.onDealComplete();
-        }
-      }
-    }
-    if (this.pushStartedAt) {
-      const progress = THREE.MathUtils.clamp((now - this.pushStartedAt) / 620, 0, 1);
-      const eased = progress * progress * (3 - 2 * progress);
-      this.cards.forEach((entry, index) => {
-        const start = this.pushStartPositions[index] ?? entry.tableTarget;
-        entry.group.position.lerpVectors(start, entry.target, eased);
-        entry.group.position.y += Math.sin(progress * Math.PI) * 0.025;
-      });
-      if (!this.dealDone && progress >= 1) {
-        this.pushStartedAt = 0;
         this.dealDone = true;
         this.cards.forEach((entry) => entry.group.position.copy(entry.target));
         this.onDealComplete();
@@ -1211,6 +1517,16 @@ export class TableScene {
         this.focusTarget = null;
         done();
       }
+    }
+    if (this.coveredReorder) {
+      this.coveredReorder.indices.forEach((index) => {
+        if (index === this.coveredReorder?.dragIndex) return;
+        const card = this.cards[index];
+        const target = this.coveredReorder?.targets.get(index);
+        if (!card || !target) return;
+        const floatHeight = 0.58 + Math.sin(now / 230 + index * 1.7) * 0.075;
+        card.group.position.lerp(new THREE.Vector3(target.x, floatHeight, target.z), 0.2);
+      });
     }
     if (this.chipTransferStartedAt) {
       const elapsed = now - this.chipTransferStartedAt;

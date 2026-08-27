@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   BASE_CONFIDENCE,
+  cheatSkillDefinitions,
   divineCardTypeForRank,
   Game,
   LOBBY_ROUND_MS,
@@ -8,9 +9,12 @@ import {
   RESTAURANT_CYCLE_WORLD_MINUTES,
   SLEEP_DEBT_PER_MIDNIGHT_WORLD_MINUTES,
   SLEEP_DEBT_THRESHOLD_WORLD_MINUTES,
+  TABLE_HISTORY_RESET_THRESHOLD,
+  TABLE_HISTORY_RESTART_ROUNDS,
   WORLD_MINUTES_PER_REAL_SECOND_INSIDE_CASINO,
   WORLD_MINUTES_PER_REAL_SECOND_OUTSIDE_CASINO,
   inlineWatchSteps,
+  type DivineCardType,
 } from "./game";
 import { confidenceRoadStartColumn, type RoundResult } from "./domain";
 
@@ -28,9 +32,127 @@ describe("Divine Assist card types", () => {
     expect([9, 10].map(divineCardTypeForRank)).toEqual(["four-edge", "four-edge"]);
     expect([11, 12, 13].map(divineCardTypeForRank)).toEqual(["face", "face", "face"]);
   });
+
+  it("uses descriptive names for temporary cheat skills", () => {
+    expect(cheatSkillDefinitions.map((definition) => definition.name)).toEqual([
+      "透视盖牌",
+      "重排盖牌",
+      "指定边数",
+      "重抽明牌",
+      "调换明牌",
+    ]);
+  });
 });
 
 describe("chain wagering and chip economy", () => {
+  it("reorders every selected covered card and charges one chip only after validation", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("swap-covered")) game.grantTemporaryCheatSkill();
+    game.reserveChipBet(100);
+    const pending = game.play("harbor-1", { side: "player", amount: 100 });
+    const before = [...pending.result.playerCards];
+    const chipsBefore = game.availableChips;
+    expect(game.useCheatSkill("swap-covered", "player", 0, null, [1, 0], [0, 1])).toBe(true);
+    expect(pending.result.playerCards[0]).toBe(before[1]);
+    expect(pending.result.playerCards[1]).toBe(before[0]);
+    expect(game.availableChips).toBe(chipsBefore - 1);
+  });
+
+  it("rejects an incomplete covered-card order without charging", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("swap-covered")) game.grantTemporaryCheatSkill();
+    game.reserveChipBet(100);
+    game.play("harbor-1", { side: "player", amount: 100 });
+    const chipsBefore = game.availableChips;
+    expect(game.useCheatSkill("swap-covered", "player", 0, null, [1], [0, 1])).toBe(false);
+    expect(game.availableChips).toBe(chipsBefore);
+  });
+
+  it("exchanges owned covered cards across chain legs and charges once", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("swap-covered")) game.grantTemporaryCheatSkill();
+    game.reserveChainStake(200, "harbor-1");
+    const chain = game.playChain("harbor-1", ["player", "banker"]);
+    const first = chain.legs[0]!.result.playerCards[0]!;
+    const second = chain.legs[1]!.result.bankerCards[0]!;
+    const chipsBefore = game.availableChips;
+    expect(game.useCoveredReorder(
+      [{ legIndex: 0, side: "player", handIndex: 0 }, { legIndex: 1, side: "banker", handIndex: 0 }],
+      [{ legIndex: 1, side: "banker", handIndex: 0 }, { legIndex: 0, side: "player", handIndex: 0 }],
+    )).toBe(true);
+    expect(chain.legs[0]!.result.playerCards[0]).toBe(second);
+    expect(chain.legs[1]!.result.bankerCards[0]).toBe(first);
+    expect(game.availableChips).toBe(chipsBefore - 1);
+  });
+
+  it("exchanges exactly two owned face-up cards across chain legs and charges once", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("swap-face-up")) game.grantTemporaryCheatSkill();
+    game.reserveChainStake(200, "harbor-1");
+    const chain = game.playChain("harbor-1", ["player", "banker"]);
+    const first = chain.legs[0]!.result.playerCards[0]!;
+    const second = chain.legs[1]!.result.bankerCards[1]!;
+    const chipsBefore = game.availableChips;
+    expect(game.useFaceUpSwap(
+      { legIndex: 0, side: "player", handIndex: 0 },
+      { legIndex: 1, side: "banker", handIndex: 1 },
+    )).toBe(true);
+    expect(chain.legs[0]!.result.playerCards[0]).toBe(second);
+    expect(chain.legs[1]!.result.bankerCards[1]).toBe(first);
+    expect(game.availableChips).toBe(chipsBefore - 1);
+  });
+
+  it("rejects a face-up swap that includes an opponent card without charging", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("swap-face-up")) game.grantTemporaryCheatSkill();
+    game.reserveChainStake(200, "harbor-1");
+    game.playChain("harbor-1", ["player", "banker"]);
+    const chipsBefore = game.availableChips;
+    expect(game.useFaceUpSwap(
+      { legIndex: 0, side: "banker", handIndex: 0 },
+      { legIndex: 1, side: "banker", handIndex: 1 },
+    )).toBe(false);
+    expect(game.availableChips).toBe(chipsBefore);
+  });
+
+  it("sets a covered card in any unsealed chain leg to the selected edge type", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("set-edge")) game.grantTemporaryCheatSkill();
+    game.reserveChainStake(200, "harbor-1");
+    const chain = game.playChain("harbor-1", ["player", "banker"]);
+    const chipsBefore = game.availableChips;
+
+    expect(game.useSetEdge({ legIndex: 1, side: "player", handIndex: 0 }, "four-edge")).toBe(true);
+    expect(divineCardTypeForRank(chain.legs[1]!.result.playerCards[0]!.rank)).toBe("four-edge");
+    expect(game.availableChips).toBe(chipsBefore - 1);
+  });
+
+  it("sets every requested edge type on any dealt card without requiring a compatible draw path", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("set-edge")) game.grantTemporaryCheatSkill();
+    game.reserveChipBet(100);
+    const pending = game.play("harbor-1", { side: "player", amount: 100 });
+    const target = { legIndex: 0, side: "player" as const, handIndex: 0 };
+    const requestedTypes: DivineCardType[] = ["face", "no-edge", "two-edge", "three-edge", "four-edge"];
+
+    requestedTypes.forEach((type) => {
+      expect(game.useSetEdge(target, type)).toBe(true);
+      expect(divineCardTypeForRank(pending.result.playerCards[0]!.rank)).toBe(type);
+    });
+  });
+
+  it("rejects invalid set-edge targets without charging or falling back to a random type", () => {
+    const game = new Game();
+    while (!game.availableCheatSkills.includes("set-edge")) game.grantTemporaryCheatSkill();
+    game.reserveChipBet(100);
+    game.play("harbor-1", { side: "player", amount: 100 });
+    const chipsBefore = game.availableChips;
+
+    expect(game.useCheatSkill("set-edge", "player", 0)).toBe(false);
+    expect(game.useSetEdge({ legIndex: 0, side: "player", handIndex: 9 }, "face")).toBe(false);
+    expect(game.availableChips).toBe(chipsBefore);
+  });
+
   it("locks one chip stake and settles independent targets with ties removed", () => {
     const game = new Game();
     const beforeChips = game.chips;
@@ -99,7 +221,7 @@ describe("chain wagering and chip economy", () => {
     const second = game.pawnRestaurantForChips();
     expect(first).toBe(4);
     expect(second).toBe(4);
-    expect(game.mudChips).toBe(8);
+    expect(game.chips).toBe(18);
     expect(game.restaurant.pawnDebtCash).toBe(800);
     expect(game.redeemRestaurant()).toBe(true);
     expect(game.cash).toBe(8000 - 2000);
@@ -108,6 +230,32 @@ describe("chain wagering and chip economy", () => {
 });
 
 describe("real-time simulation", () => {
+  it("restarts an unattended table after 100 rounds with a fresh ten-round road", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = Array.from({ length: TABLE_HISTORY_RESET_THRESHOLD }, (_, index) => table.history[index % table.history.length]!);
+    table.historyOffset = 37;
+    const previousRound = table.round;
+
+    game.tickRealtime(1_000 + LOBBY_ROUND_MS, "harbor-2");
+
+    expect(table.history).toHaveLength(TABLE_HISTORY_RESTART_ROUNDS);
+    expect(table.historyOffset).toBe(0);
+    expect(table.round).toBe(previousRound + 1 + TABLE_HISTORY_RESTART_ROUNDS);
+    vi.restoreAllMocks();
+  });
+
+  it("does not restart the table currently occupied by the player", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const game = new Game();
+    const table = game.table("harbor-1");
+    table.history = Array.from({ length: TABLE_HISTORY_RESET_THRESHOLD }, (_, index) => table.history[index % table.history.length]!);
+    game.tickRealtime(1_000 + LOBBY_ROUND_MS, table.id);
+    expect(table.history).toHaveLength(TABLE_HISTORY_RESET_THRESHOLD);
+    vi.restoreAllMocks();
+  });
+
   it("rerolls each table's dealer collateral when a new day begins", () => {
     const game = new Game();
     const table = game.table("harbor-1");
@@ -118,6 +266,7 @@ describe("real-time simulation", () => {
     expect(["chips", "cheat-skill"]).toContain(table.dealerRewardKind);
     expect(table.dealerRewardChips).toBeGreaterThanOrEqual(3);
     expect(table.dealerRewardChips).toBeLessThanOrEqual(10);
+    if (table.dealerRewardKind === "cheat-skill") expect(table.dealerRewardSkillId).toBeTruthy();
     expect(before.kind === table.dealerRewardKind && before.chips === table.dealerRewardChips).toBe(false);
   });
   it("pays restaurant income by elapsed time", () => {
@@ -230,7 +379,7 @@ describe("real-time simulation", () => {
     game.continueRestaurantThroughNextClose();
     const secondMidnight = game.tickRealtime(31_000, null, false, false, true);
     expect(game.worldTimeInfo()).toEqual({ day: 3, hour: 0, minute: 0 });
-    expect(secondMidnight.sleepDeprivationStarted).toBe(true);
+    expect(secondMidnight.sleepDeprivationStarted).toBe(false);
     expect(game.sleepDebtWorldMinutes).toBe(16 * 60);
     vi.restoreAllMocks();
   });
@@ -326,12 +475,12 @@ describe("real-time simulation", () => {
 
     const deprivation = game.tickRealtime(7_000, null, false);
     expect(game.worldTimeInfo()).toEqual({ day: 2, hour: 0, minute: 0 });
-    expect(deprivation.sleepDeprivationStarted).toBe(true);
-    expect(game.sleepDeprivationCollapseAtWorldMinute).toBe(1440 + 8 * 60);
+    expect(deprivation.sleepDeprivationStarted).toBe(false);
+    expect(game.sleepDeprivationCollapseAtWorldMinute).toBeNull();
 
     const collapse = game.tickRealtime(15_000, null, false);
     expect(game.worldTimeInfo()).toEqual({ day: 2, hour: 8, minute: 0 });
-    expect(collapse.sleepDeprivationCollapseReached).toBe(true);
+    expect(collapse.sleepDeprivationCollapseReached).toBe(false);
     vi.restoreAllMocks();
   });
 
@@ -412,8 +561,8 @@ describe("debug gameplay configuration", () => {
     const tick = game.tickRealtime(7_000, null, false);
 
     expect(game.sleepDebtWorldMinutes).toBe(3 * 60);
-    expect(game.isSleepDeprived()).toBe(true);
-    expect(tick.sleepDeprivationStarted).toBe(true);
+    expect(game.isSleepDeprived()).toBe(false);
+    expect(tick.sleepDeprivationStarted).toBe(false);
     vi.restoreAllMocks();
   });
 
@@ -452,8 +601,17 @@ describe("tie betting", () => {
     const pending = game.play("harbor-1", { side: "tie", amount: 100 });
     pending.result.outcome = "tie";
     const settlement = game.settle();
-    expect(settlement.delta).toBe(800);
-    expect(game.cash).toBe(8_800);
+    expect(settlement.delta).toBe(900);
+    expect(game.cash).toBe(8_900);
+  });
+
+  it("pays a winning banker bet at the same 2 to 1 multiplier as player", () => {
+    const game = new Game();
+    const pending = game.play("harbor-1", { side: "banker", amount: 100 });
+    pending.result.outcome = "banker";
+    const settlement = game.settle();
+    expect(settlement.delta).toBe(200);
+    expect(game.cash).toBe(8_200);
   });
 });
 
@@ -463,11 +621,11 @@ describe("staged chip betting", () => {
 
     expect(game.reserveBetChip(100)).toBe(true);
     expect(game.reserveBetChip(200)).toBe(true);
-    expect(game.cash).toBe(7_700);
+    expect(game.chips).toBe(7);
     expect(game.reservedBetAmount).toBe(300);
 
     game.play("harbor-1", { side: "player", amount: 300 });
-    expect(game.cash).toBe(7_700);
+    expect(game.chips).toBe(7);
     expect(game.reservedBetAmount).toBe(0);
   });
 
@@ -477,7 +635,7 @@ describe("staged chip betting", () => {
     game.reserveBetChip(500);
 
     expect(game.cancelReservedBet()).toBe(600);
-    expect(game.cash).toBe(8_000);
+    expect(game.chips).toBe(10);
     expect(game.reservedBetAmount).toBe(0);
   });
 
@@ -487,7 +645,8 @@ describe("staged chip betting", () => {
 
     expect(() => game.play("harbor-1", { side: "banker", amount: 200 })).toThrow("确认金额与暂存筹码不一致");
     expect(() => game.play("harbor-1", null)).toThrow("旁观前需取消暂存筹码");
-    expect(game.cash).toBe(7_900);
+    expect(game.cash).toBe(8_000);
+    expect(game.chips).toBe(9);
     expect(game.reservedBetAmount).toBe(100);
   });
 });
@@ -515,19 +674,20 @@ describe("inline watch animation", () => {
 describe("casino entry fees", () => {
   it("charges the configured fee each time a casino is entered", () => {
     const game = new Game();
+    game.chips = 20;
 
     expect(game.enterCasino("harbor")).toBe(true);
-    expect(game.cash).toBe(7_900);
+    expect(game.chips).toBe(19);
     expect(game.enterCasino("grand")).toBe(true);
-    expect(game.cash).toBe(6_900);
+    expect(game.chips).toBe(9);
   });
 
-  it("rejects entry without enough cash and does not change the balance", () => {
+  it("rejects entry without enough chips and does not change the balance", () => {
     const game = new Game();
-    game.cash = 999;
+    game.chips = 0;
 
     expect(game.enterCasino("grand")).toBe(false);
-    expect(game.cash).toBe(999);
+    expect(game.chips).toBe(0);
   });
 });
 
