@@ -54,7 +54,7 @@ git switch -c feature/short-description
 
 ## 3. 开发与提交
 
-先定位现有实现和测试，再进行最小范围修改。保持提交小而独立，完成一个可解释的步骤就提交并推送一次。
+先定位现有实现和测试，再进行最小范围修改。保持提交小而独立；每个可解释的步骤都应先验证，再提交并推送。
 
 提交信息必须符合 Conventional Commits：
 
@@ -65,6 +65,9 @@ git switch -c feature/short-description
 例如：
 
 ```bash
+git diff --check
+npm test -- --run
+npm run build
 git add src/game.ts src/game.test.ts
 git commit -m "fix(gameplay): 恢复千术后的翻牌操作"
 git push -u origin fix/restore-card-flip
@@ -74,7 +77,7 @@ Husky 会在本地提交时运行 commitlint；CI 会在 PR 中再次检查全�
 
 ## 4. 验证改动
 
-提交 PR 前至少运行：
+提交 PR 前至少运行以下完整检查；日常小步提交前也应运行与改动相匹配的测试和构建：
 
 ```bash
 npm ci
