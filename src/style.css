@@ -54,11 +54,11 @@
 .global-wager { color:#f1e4c5;font-size:10px;font-weight:800;white-space:nowrap; }
 .single-global-status { position:fixed;z-index:175;left:0;right:0;top:64px;background:#111a15;box-shadow:0 8px 24px rgba(0,0,0,.28); }.live-deal-panel:has(.single-global-status) { padding-top:220px; }
 .live-deal-panel:has(.chain-global-status) { padding-top:70px; }
-@media (max-width: 780px) { .chain-table-grid { grid-template-columns:repeat(var(--chain-count, 1),minmax(0,1fr));gap:4px; }.chain-stage-host { flex-basis:230px;height:230px; }.immersive-table-stage.has-chain-boards { padding:4px; } }
+@media (max-width: 780px) { .chain-table-grid { grid-template-columns:1fr;gap:10px; }.chain-stage-host { flex-basis:clamp(240px,68vw,320px);height:clamp(240px,68vw,320px); }.immersive-table-stage.has-chain-boards { padding:4px; } }
 @media (max-width: 780px) { .chain-leg-report { grid-template-columns:1fr;min-height:0; }.chain-report-lead { padding:8px 10px; }.chain-report-lead h2 { font-size:20px; }.chain-report-score-panel { grid-template-columns:minmax(90px,1fr) repeat(2,minmax(78px,1fr));border-left:0;border-top:1px solid rgba(237,233,220,.13); }.chain-report-summary,.chain-report-score-cell { min-height:66px;padding:7px; } }
-@media (max-width: 780px) { .chain-global-status { top:64px;align-items:flex-start;flex-wrap:wrap;padding:8px 10px; }.chain-global-status .deal-status-title { gap:7px; }.chain-global-status h1 { font-size:16px; }.chain-global-status > span { flex:1 1 100%;font-size:9px; }.chain-global-status .cheat-controls { flex:1 1 100%;margin-left:0;max-width:none;padding:4px 0;border:0;background:transparent; }.live-deal-panel:has(.chain-global-status) { padding-top:112px; } }
+@media (max-width: 780px) { .chain-global-status { top:64px;align-items:flex-start;flex-wrap:wrap;padding:8px 10px; }.chain-global-status .deal-status-title { gap:7px; }.chain-global-status h1 { font-size:16px; }.chain-global-status > span { flex:1 1 100%;font-size:9px; }.chain-global-status .cheat-controls { flex:1 1 100%;margin-left:0;max-width:none;padding:4px 0;border:0;background:transparent; }.live-deal-panel:has(.chain-global-status) { padding-top:0; } }
 @media (max-width: 780px) { .chain-global-confidence { grid-template-columns:auto auto;flex:1 1 100%;align-items:start;gap:4px; }.chain-global-confidence .confidence-breakdown { grid-column:1/-1;width:100%;overflow:visible; }.chain-global-confidence > span { font-size:10px; } }
-@media (max-width: 780px) { .single-global-status { top:64px; }.live-deal-panel:has(.single-global-status) { padding-top:200px; } }
+@media (max-width: 780px) { .single-global-status { top:64px; }.live-deal-panel:has(.single-global-status) { padding-top:0; } }
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: #11130f; }
@@ -544,14 +544,49 @@ main { min-height: calc(100vh - 72px); }
   .residence-scene-page { min-height:calc(100vh - 64px);overflow:auto;background:#11151a; }.residence-scene { min-height:0;height:56.25vw;aspect-ratio:16/9;margin-top:90px;overflow:visible; }.residence-scene-art { inset:0;object-fit:contain;object-position:center top;filter:saturate(.92) brightness(.88); }.residence-scene-shade { background:linear-gradient(180deg,rgba(8,10,13,.35),transparent 46%,rgba(8,10,13,.15)); }.residence-scene-header { left:16px;top:-74px; }.residence-scene-header h1 { font-size:29px; }.residence-scene-header small { font-size:9px; }.home-scene-hotspot { min-height:42px;grid-template-columns:20px auto;gap:6px;padding:5px 8px 5px 6px; }.home-scene-hotspot > i { width:18px;height:18px; }.home-scene-hotspot > i::before,.home-scene-hotspot > i::after { width:28px;height:28px; }.home-scene-hotspot b { font-size:14px; }.home-scene-hotspot small { display:none; }.home-hotspot-bed { left:23%;top:62%; }.home-hotspot-desk { left:70%;top:34%; }.home-skill-overlay { position:fixed;top:64px;padding:10px; }.home-skill-overlay .residence-skill-workspace { width:100%;max-height:calc(100vh - 84px);padding:10px; }.home-skill-header { position:sticky;z-index:4;top:-10px;margin:-10px -10px 12px;padding:12px;background:#0c1220; }.home-skill-header h2 { font-size:23px; }.residence-skill-workspace .skill-grid { grid-template-columns:1fr;gap:8px; }.residence-skill-workspace .skill-card { min-height:0;padding:12px; }.residence-skill-workspace .equipped-skill-slot { padding:14px;align-items:flex-start; }.schedule-modal { padding:14px; }.schedule-modal section { padding:23px 17px; }.schedule-modal section > div { flex-direction:column; }.schedule-modal button { width:100%; }
 }
 
-/* 全局播报栏吸顶但保留布局高度，避免滚动时覆盖 3D 牌桌视口。 */
+/* 全局播报栏参与文档流，确保不会覆盖 3D 牌桌视口。 */
 .single-global-status,
-.chain-global-status { position:sticky;top:72px;left:auto;right:auto;width:100%; }
+.chain-global-status { position:relative;top:auto;left:auto;right:auto;width:100%;box-sizing:border-box; }
 .live-deal-panel:has(.single-global-status),
 .live-deal-panel:has(.chain-global-status) { padding-top:0 !important; }
 @media (max-width: 780px) {
   .single-global-status,
-  .chain-global-status { top:64px; }
+  .chain-global-status { top:auto;min-width:0; }
+}
+
+@media (max-width: 780px) {
+  .live-deal-panel .deal-status {
+    display:flex;
+    flex-wrap:wrap;
+    align-items:stretch;
+    gap:8px;
+    min-width:0;
+  }
+  .live-deal-panel .deal-status > * { min-width:0; }
+  .single-global-status .deal-status-title,
+  .single-global-status .live-baccarat-score,
+  .single-global-status > span,
+  .single-global-status .confidence-breakdown,
+  .single-global-status .cheat-controls,
+  .single-global-status .give-up-actions,
+  .chain-global-status .chain-global-confidence,
+  .chain-global-status .confidence-breakdown,
+  .chain-global-status .cheat-controls,
+  .chain-global-status .give-up-actions {
+    flex:1 1 100%;
+    width:100%;
+  }
+  .live-deal-panel .deal-status h1,
+  .live-deal-panel .deal-status p,
+  .live-deal-panel .deal-status span,
+  .live-deal-panel .deal-status small,
+  .live-deal-panel .deal-status strong,
+  .live-deal-panel .deal-status b {
+    overflow-wrap:anywhere;
+    word-break:break-word;
+  }
+  .chain-global-confidence { grid-template-columns:minmax(0,1fr) auto; }
+  .chain-global-confidence > span { white-space:normal; }
 }
 
 /* 全局可读性：统一放大界面文字，保持标题层级与 3D 牌张尺寸不变。 */
