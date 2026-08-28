@@ -2,6 +2,8 @@
 
 本项目采用 GitHub Flow。`main` 始终保持可部署、稳定；所有改动都必须通过短期分支和 Pull Request（PR）进入 `main`，不得直接推送。
 
+完整的逐步操作、接手检查和 agent 交接格式请参阅[开发协作 SOP](docs/development-sop.md)。本文保留规则总览和发布约束。
+
 ## 日常开发
 
 开始工作前，从更新后的 `main` 创建语义明确的短期分支：
