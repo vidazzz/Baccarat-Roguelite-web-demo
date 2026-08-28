@@ -204,11 +204,11 @@ export interface CoveredReorderCard {
 }
 
 export const cheatSkillDefinitions: readonly CheatSkillDefinition[] = [
-  { id: "peek-covered", name: "透视盖牌", timing: "covered", description: "查看所有未结算牌局中已发出的盖牌，但不翻开。" },
-  { id: "swap-covered", name: "重排盖牌", timing: "covered", description: "拿起所有未结算牌局中的己方盖牌，可跨牌局按任意顺序重新排列。" },
+  { id: "peek-covered", name: "透视盖牌", timing: "covered", description: "查看所有牌局中已发出的盖牌，但不翻开。" },
+  { id: "swap-covered", name: "重排盖牌", timing: "covered", description: "拿起所有牌局中的己方盖牌，可跨牌局按任意顺序重新排列。" },
   { id: "set-edge", name: "指定边数", timing: "covered", description: "选择一张盖牌并指定公、没边、两边、三边或四边，再随机替换为该类牌。" },
   { id: "redraw-face-up", name: "重抽明牌", timing: "face-up", description: "重新抽取一张已翻开的明牌，并重新计算牌局结果。" },
-  { id: "swap-face-up", name: "调换明牌", timing: "face-up", description: "从所有未结算牌局中选择两张己方明牌进行一次交换。" },
+  { id: "swap-face-up", name: "调换明牌", timing: "face-up", description: "从所有牌局中选择两张己方明牌进行一次交换。" },
 ];
 export const CHEAT_SKILL_COST = 1;
 
@@ -352,10 +352,7 @@ export class Game {
     const targetResult = this.pendingChain && chainLegIndex !== null
       ? this.pendingChain.legs[chainLegIndex]?.result
       : this.pending?.result;
-    const targetLeg = this.pendingChain && chainLegIndex !== null
-      ? this.pendingChain.legs[chainLegIndex]
-      : null;
-    if (!targetResult || targetLeg?.settled || !this.consumeChips(CHEAT_SKILL_COST)) return false;
+    if (!targetResult || !this.consumeChips(CHEAT_SKILL_COST)) return false;
     const hand = side === "player" ? targetResult.playerCards : targetResult.bankerCards;
     if (!hand[handIndex]) {
       this.refundChips(1);
@@ -382,7 +379,7 @@ export class Game {
     const resolve = (): RoundResult | null => {
       if (this.pendingChain) {
         const leg = this.pendingChain.legs[target.legIndex];
-        return leg && !leg.settled ? leg.result : null;
+        return leg?.result ?? null;
       }
       return target.legIndex === 0 ? this.pending?.result ?? null : null;
     };
@@ -418,7 +415,7 @@ export class Game {
       if (!Number.isInteger(reference.legIndex) || !Number.isInteger(reference.handIndex) || reference.handIndex < 0) return null;
       if (this.pendingChain) {
         const leg = this.pendingChain.legs[reference.legIndex];
-        if (!leg || leg.settled || leg.target !== reference.side) return null;
+        if (!leg || leg.target !== reference.side) return null;
         const hand = reference.side === "player" ? leg.result.playerCards : leg.result.bankerCards;
         return hand[reference.handIndex] ? { result: leg.result, hand } : null;
       }
@@ -455,7 +452,7 @@ export class Game {
       if (!Number.isInteger(reference.legIndex) || !Number.isInteger(reference.handIndex) || reference.handIndex < 0) return null;
       if (this.pendingChain) {
         const leg = this.pendingChain.legs[reference.legIndex];
-        if (!leg || leg.settled) return null;
+        if (!leg) return null;
         const hand = reference.side === "player" ? leg.result.playerCards : leg.result.bankerCards;
         return hand[reference.handIndex] ? { result: leg.result, hand } : null;
       }
@@ -640,7 +637,6 @@ export class Game {
     const chain = this.pendingChain;
     if (!chain || !Number.isInteger(index) || index < 0 || index >= chain.legs.length) return null;
     const leg = chain.legs[index]!;
-    if (leg.settled) return null;
     chain.currentLegIndex = index;
     this.pending = this.pendingRoundForChainLeg(chain, leg);
     this.confidence = this.debugConfidenceForced ? 1 : this.pending.confidence;
@@ -664,44 +660,89 @@ export class Game {
     };
   }
 
+  private hasCheatResources(): boolean {
+    return this.availableChips >= CHEAT_SKILL_COST && this.availableCheatSkills.length > 0;
+  }
+
+  private chainLegWon(leg: ChainLeg): boolean {
+    return leg.result.outcome === leg.target;
+  }
+
+  private chainCanPayOut(chain: PendingChain): boolean {
+    return chain.legs.every((leg) => leg.result.outcome === "tie" || this.chainLegWon(leg));
+  }
+
+  private completeChainSettlement(chain: PendingChain, chainIndex: number): SettlementResult {
+    const table = this.table(chain.tableId);
+    const ties = chain.legs.filter((leg) => leg.result.outcome === "tie").length;
+    const effectiveRounds = chain.plannedRounds - ties;
+    const won = this.chainCanPayOut(chain);
+    const payout = won ? chain.stake * (2 ** effectiveRounds) : 0;
+    if (payout > 0) {
+      this.cash += payout;
+      table.dealerCash = Math.max(0, table.dealerCash - payout);
+    }
+    const dealerReward = payout > 0 ? this.grantDealerReward(table) : null;
+    this.pending = null;
+    this.pendingChain = null;
+    if (won) this.roundWinStreak += 1;
+    else this.roundWinStreak = 0;
+    return { delta: payout, income: 0, roadCreation: null, chainCompleted: true, chainIndex, dealerReward };
+  }
+
+  private reconcileSettledChain(chain: PendingChain, chainIndex: number): SettlementResult {
+    if (!chain.legs.every((leg) => leg.settled)) {
+      return { delta: 0, income: 0, roadCreation: null, chainContinues: true, chainIndex, dealerReward: null };
+    }
+    this.pending = null;
+
+    // A tied banker/player bet can still be changed with a cheat. Only end the
+    // chain automatically when every bet hit, or when there are no cheat
+    // resources left to change a losing or tied result.
+    if (chain.legs.every((leg) => this.chainLegWon(leg)) || !this.hasCheatResources()) {
+      return this.completeChainSettlement(chain, chainIndex);
+    }
+    return { delta: 0, income: 0, roadCreation: null, chainContinues: true, chainIndex, dealerReward: null };
+  }
+
+  /**
+   * Re-evaluate a previously settled chain leg after a cheat changed its cards.
+   * The leg result is already present in table history by reference, so this
+   * does not append history or apply a payout a second time.
+   */
+  reconcileChainAfterCheat(legIndex: number): SettlementResult | null {
+    const chain = this.pendingChain;
+    const leg = chain?.legs[legIndex];
+    if (!chain || !leg?.settled) return null;
+    return this.reconcileSettledChain(chain, leg.index);
+  }
+
+  /** Finalize an all-settled chain after the UI determines no legal cheat target remains. */
+  finalizeSettledChain(): SettlementResult | null {
+    const chain = this.pendingChain;
+    if (!chain || !chain.legs.every((leg) => leg.settled)) return null;
+    return this.completeChainSettlement(chain, chain.currentLegIndex);
+  }
+
   private settleChainLeg(): SettlementResult {
     const chain = this.pendingChain!;
     const leg = chain.legs[chain.currentLegIndex]!;
     const table = this.table(chain.tableId);
-    if (leg.settled) throw new Error("This chain leg is already settled");
-    table.history.push(leg.result);
-    table.round += 1;
-    this.trimTableHistory(table);
-    leg.settled = true;
-    const tie = leg.result.outcome === "tie";
-    const won = tie || leg.result.outcome === leg.target;
-    const planned = this.roadCreation(chain.tableId);
-    if (planned) {
-      const remaining = this.roadCreationSequence(chain.tableId).slice(1);
-      if (leg.result.outcome !== planned) this.roadCreations.delete(chain.tableId);
-      else if (remaining.length) this.roadCreations.set(chain.tableId, remaining);
-      else this.roadCreations.delete(chain.tableId);
+    if (!leg.settled) {
+      table.history.push(leg.result);
+      table.round += 1;
+      this.trimTableHistory(table);
+      leg.settled = true;
+      const planned = this.roadCreation(chain.tableId);
+      if (planned) {
+        const remaining = this.roadCreationSequence(chain.tableId).slice(1);
+        if (leg.result.outcome !== planned) this.roadCreations.delete(chain.tableId);
+        else if (remaining.length) this.roadCreations.set(chain.tableId, remaining);
+        else this.roadCreations.delete(chain.tableId);
+      }
     }
-    if (!won) {
-      this.pending = null;
-      this.pendingChain = null;
-      this.roundWinStreak = 0;
-      return { delta: 0, income: 0, roadCreation: null, chainCompleted: true, chainIndex: leg.index, dealerReward: null };
-    }
-    if (!chain.legs.every((item) => item.settled)) {
-      this.pending = null;
-      return { delta: 0, income: 0, roadCreation: null, chainContinues: true, chainIndex: leg.index, dealerReward: null };
-    }
-    const ties = chain.legs.filter((item) => item.result.outcome === "tie").length;
-    const effectiveRounds = chain.plannedRounds - ties;
-    const payout = chain.stake * (2 ** effectiveRounds);
-    this.cash += payout;
-    table.dealerCash = Math.max(0, table.dealerCash - payout);
-    const dealerReward = this.grantDealerReward(table);
     this.pending = null;
-    this.pendingChain = null;
-    this.roundWinStreak += 1;
-    return { delta: payout, income: 0, roadCreation: null, chainCompleted: true, chainIndex: leg.index, dealerReward };
+    return this.reconcileSettledChain(chain, leg.index);
   }
 
   settleChain(): ChainSettlementResult {
@@ -711,8 +752,11 @@ export class Game {
     let ties = 0;
     let won = true;
     for (const leg of pending.legs) {
-      table.history.push(leg.result);
-      table.round += 1;
+      if (!leg.settled) {
+        table.history.push(leg.result);
+        table.round += 1;
+        leg.settled = true;
+      }
       if (leg.result.outcome === "tie") {
         ties += 1;
         continue;
