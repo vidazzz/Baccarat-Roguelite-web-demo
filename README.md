@@ -55,6 +55,7 @@ npm run build
 - [MVP 游戏设计文档](docs/game-design.md)
 - [MVP 技术设计文档](docs/technical-design.md)
 - [协作与版本发布规范](CONTRIBUTING.md)
+- [开发协作 SOP（成员与 Agent）](docs/development-sop.md)
 
 ## 项目阶段
 
