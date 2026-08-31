@@ -391,12 +391,7 @@ function cheatTargetsOnTable(skillId: CheatSkillId): CheatTarget[] {
 
 function hasLegalCheatOpportunity(): boolean {
   if (game.availableChips < CHEAT_SKILL_COST) return false;
-  return game.availableCheatSkills.some((skillId) => {
-    const targets = cheatTargetsOnTable(skillId);
-    if (skillId === "swap-covered") return new Set(targets.map((target) => target.legIndex)).size >= 2;
-    if (skillId === "swap-face-up") return targets.length >= 2;
-    return targets.length > 0;
-  });
+  return game.availableCheatSkills.some((skillId) => !cheatSkillActivationBlockReason(skillId));
 }
 
 function refreshCheatTargetScene(target: CheatTarget, skillId: CheatSkillId): void {
@@ -579,7 +574,7 @@ function applySetEdgeChoice(type: DivineCardType): void {
 }
 
 function openCardReorder(skillId: "swap-covered" | "swap-face-up"): void {
-  if (!ensureCheatSkillAffordable()) return;
+  if (!ensureCheatSkillCanActivate(skillId)) return;
   cardReorderSession?.cancel();
   const isFaceUpSwap = skillId === "swap-face-up";
   const cards: ReorderSceneCard[] = [];
@@ -882,27 +877,42 @@ function openCardReorder(skillId: "swap-covered" | "swap-face-up"): void {
   bindCoveredReorderActions();
 }
 
-function hasCoveredCardsOnTable(): boolean {
-  const legs = game.pendingChain ? game.pendingChain.legs.map((_, index) => index) : [0];
-  for (const legIndex of legs) {
-    const pending = game.pendingChain ? pendingChainLeg(legIndex) : game.pending;
-    if (!pending) continue;
-    const active = !game.pendingChain || Boolean(game.pending && game.pendingChain.currentLegIndex === legIndex);
-    const count = active ? dealtCardCount : chainLegUiStates.get(legIndex)?.dealtCardCount ?? 4;
-    for (let cardIndex = 0; cardIndex < count; cardIndex += 1) {
-      if (cheatTargetForCard("peek-covered", legIndex, cardIndex)) return true;
+function cheatSkillActivationBlockReason(skillId: CheatSkillId): string | null {
+  const definition = cheatSkillDefinitions.find((item) => item.id === skillId);
+  const name = definition?.name ?? "这项千术";
+  const targets = cheatTargetsOnTable(skillId);
+
+  if (skillId === "swap-covered") {
+    if (!targets.length) return `场上没有己方盖牌，${name}无法发动`;
+    if (new Set(targets.map((target) => target.legIndex)).size < 2) {
+      return `${name}需要至少两个牌局各有一张己方盖牌`;
     }
+    return null;
   }
+
+  if (skillId === "swap-face-up") {
+    if (!targets.length) return `场上没有己方明牌，${name}无法发动`;
+    if (targets.length < 2) return `当前只有一张己方明牌，无法${name}`;
+    return null;
+  }
+
+  if (targets.length) return null;
+  if (skillId === "peek-covered") return `场上已经没有盖牌，${name}无法发动`;
+  if (skillId === "set-edge") return `场上没有盖牌，${name}无法发动`;
+  return `场上没有明牌，${name}无法发动`;
+}
+
+function ensureCheatSkillCanActivate(skillId: CheatSkillId): boolean {
+  if (!ensureCheatSkillAffordable()) return false;
+  const reason = cheatSkillActivationBlockReason(skillId);
+  if (!reason) return true;
+  game.notice = reason;
+  showTableActionNotice(reason);
   return false;
 }
 
 function usePeekCoveredImmediately(): void {
-  if (!ensureCheatSkillAffordable()) return;
-  if (!hasCoveredCardsOnTable()) {
-    game.notice = "场上已经没有盖牌，透视盖牌无法发动";
-    showTableActionNotice(game.notice);
-    return;
-  }
+  if (!ensureCheatSkillCanActivate("peek-covered")) return;
   const legs = game.pendingChain ? game.pendingChain.legs.map((_, index) => index) : [0];
   for (const legIndex of legs) {
     const pending = game.pendingChain ? pendingChainLeg(legIndex) : game.pending;
@@ -941,7 +951,7 @@ function ensureCheatSkillAffordable(): boolean {
 }
 
 function openCheatTargetPicker(skillId: CheatSkillId): void {
-  if (!ensureCheatSkillAffordable()) return;
+  if (!ensureCheatSkillCanActivate(skillId)) return;
   if (skillId === "set-edge") setEdgeTarget = null;
   armedCheatSkill = skillId;
   game.notice = cheatTargetInstruction(skillId);
@@ -1707,7 +1717,7 @@ function cheatSkillActionsMarkup(locked = false): string {
   const setEdgeTypeHidden = armedCheatSkill === "set-edge" && setEdgeTarget ? "" : "hidden";
   const reorderName = armedCheatSkill === "swap-face-up" ? "调换明牌" : "重排盖牌";
   const setEdgeTypeChoices = DIVINE_CARD_TYPE_OPTIONS.map((choice) => `<button type="button" class="set-edge-type-option" data-set-edge-type="${choice.type}" ${locked ? "disabled" : ""} ${setEdgeTypeHidden}><b>${choice.label}</b><small>${choice.detail}</small></button>`).join("");
-  return `${game.availableCheatSkills.map((id) => { const definition = cheatSkillDefinitions.find((item) => item.id === id); const unavailable = id === "peek-covered" && !hasCoveredCardsOnTable(); const availabilityHint = unavailable ? " · 当前无盖牌，无法发动" : ""; return `<button type="button" data-cheat-skill="${id}" ${locked ? "disabled" : ""} ${skillsHidden} title="${definition?.description ?? "选择后直接点击目标牌"} · 费用 ${CHEAT_SKILL_COST} 枚筹码${availabilityHint}">${definition?.name ?? id} · ${CHEAT_SKILL_COST} 枚筹码</button>`; }).join("")}${setEdgeTypeChoices}<button type="button" class="cheat-confirm-action ${reorderHidden}" data-covered-reorder-confirm>确认${reorderName}</button><button type="button" class="cheat-cancel-action ${reorderHidden}" data-covered-reorder-cancel>取消${reorderName}</button><button type="button" class="cheat-cancel-action ${cheatCancelHidden}" data-action="cancel-cheat" data-cheat-cancel>取消出千</button>`;
+  return `${game.availableCheatSkills.map((id) => { const definition = cheatSkillDefinitions.find((item) => item.id === id); const blockReason = cheatSkillActivationBlockReason(id); const availabilityHint = blockReason ? ` · ${blockReason}` : ""; return `<button type="button" data-cheat-skill="${id}" ${locked ? "disabled" : ""} ${skillsHidden} title="${definition?.description ?? "选择后直接点击目标牌"} · 费用 ${CHEAT_SKILL_COST} 枚筹码${availabilityHint}">${definition?.name ?? id} · ${CHEAT_SKILL_COST} 枚筹码</button>`; }).join("")}${setEdgeTypeChoices}<button type="button" class="cheat-confirm-action ${reorderHidden}" data-covered-reorder-confirm>确认${reorderName}</button><button type="button" class="cheat-cancel-action ${reorderHidden}" data-covered-reorder-cancel>取消${reorderName}</button><button type="button" class="cheat-cancel-action ${cheatCancelHidden}" data-action="cancel-cheat" data-cheat-cancel>取消出千</button>`;
 }
 
 function bindCoveredReorderActions(root: ParentNode = app): void {
@@ -1748,7 +1758,6 @@ function bindCheatSkillActions(root: ParentNode = app): void {
     element.dataset.cheatBound = "true";
     element.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (!ensureCheatSkillAffordable()) return;
       const skillId = element.dataset.cheatSkill as CheatSkillId;
       if (skillId === "peek-covered") usePeekCoveredImmediately();
       else if (skillId === "swap-covered" || skillId === "swap-face-up") openCardReorder(skillId);
