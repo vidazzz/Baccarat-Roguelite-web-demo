@@ -1558,7 +1558,7 @@ function tableView(): string {
     return shell(`
       <section class="table-page table-entry-page">
         <div class="table-header table-header-status"><span class="round-count">下注设置 · ${selectedCount}/${maxRounds} 局</span></div>
-        <div class="table-entry-layout">${entryRoad}<section class="table-entry-step table-target-step"><header><span>第 2 步 / 2</span><h2>选择每局下注目标</h2><p>每局使用已确定的 ${selectedChipCount} 枚筹码；重复点击可撤回。</p></header><div class="entry-target-controls"><div class="entry-payout-summary"><span>预计回报</span>${payoutFormula}</div></div>${targetTable}<div class="entry-step-actions"><button class="secondary" data-action="cancel-entry">取消</button><button class="primary" data-action="confirm-bet" data-bet-confirm ${canConfirm ? "" : "disabled"}>确定下注</button></div></section></div>
+        <div class="table-entry-layout">${entryRoad}<section class="table-entry-step table-target-step"><header><span>第 2 步 / 2</span><h2>选择每局下注目标</h2><p>可调整本场筹码数量；每局使用相同筹码，重复点击可撤回。</p></header>${chipCountSliderMarkup("entry-chip-slider", "本场下注筹码", minChipCount, sliderMax, selectedChipCount, "调整本场下注筹码")}<div class="entry-target-controls"><div class="entry-payout-summary"><span>预计回报</span>${payoutFormula}</div></div>${targetTable}<div class="entry-step-actions"><button class="secondary" data-action="cancel-entry">取消</button><button class="primary" data-action="confirm-bet" data-bet-confirm ${canConfirm ? "" : "disabled"}>确定下注</button></div></section></div>
       </section>
     `);
   }
@@ -1592,7 +1592,7 @@ function tableView(): string {
           </div>
           <div class="bet-controls">
             <div class="chip-console">
-              ${chipCountSliderMarkup("chip-tray chip-count-slider", "下注筹码", minChipCount, sliderMax, selectedChipCount, "选择下注筹码数量", inlineWatchActive || stagedAmount > 0)}
+              ${inlineWatchActive ? "" : chipCountSliderMarkup("chip-tray chip-count-slider", "下注筹码", minChipCount, sliderMax, selectedChipCount, "选择下注筹码数量", stagedAmount > 0)}
               ${inlineWatchActive ? "" : (stagedBetSide || chainTargetSelected.some(Boolean)) ? `<div class="bet-command-bar">
                 <button class="secondary" data-action="cancel-bet"><span>↶</span>取消</button>
                 <button class="primary" data-action="confirm-bet" data-bet-confirm ${canConfirm ? "" : "disabled"}><span>✓</span>确认</button>
