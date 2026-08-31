@@ -362,11 +362,13 @@ function cheatTargetForCard(skillId: CheatSkillId, legIndex: number, cardIndex: 
   const active = !chain || Boolean(game.pending && chain.currentLegIndex === legIndex);
   const count = active ? dealtCardCount : chainLegUiStates.get(legIndex)?.dealtCardCount ?? 4;
   const revealed = active ? revealedCardIndices : chainLegUiStates.get(legIndex)?.revealedCardIndices ?? new Set<number>();
+  const peeked = active ? peekedCardIndices : chainLegUiStates.get(legIndex)?.peekedCardIndices ?? new Set<number>();
   const entry = dealSequence(pending)[cardIndex];
   if (!entry || cardIndex >= count) return null;
   const isCovered = !revealed.has(cardIndex);
   const coveredSkill = ["peek-covered", "swap-covered", "set-edge"].includes(skillId);
   if (coveredSkill !== isCovered) return null;
+  if (skillId === "peek-covered" && peeked.has(cardIndex)) return null;
   if (skillId === "swap-covered" && playerOwnedSide(pending) !== entry.side) return null;
   return { legIndex, cardIndex, side: entry.side, handIndex: entry.handIndex, label: `第 ${legIndex + 1} 局 · ${entry.side === "player" ? "PLAYER" : "BANKER"} · 第 ${entry.handIndex + 1} 张 · ${isCovered ? "盖牌" : "明牌"}` };
 }
